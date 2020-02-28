@@ -331,7 +331,7 @@ class NeuralM(nn.Module):
             h = left_h + right_h
             del left_h, right_h, left_right_h
 
-        # h = self.dropout(h)
+        h = self.dropout(h)
         if is_decision:
             h = self.decision_out_linear(
                 self.activate(self.decision_linear(h)))

@@ -20,7 +20,7 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     dmv_batch_size: int = 10240
     reset_neural: bool = False
     neural_stop_criteria: float = 1e-4
-    neural_max_subepoch: int = 50
+    neural_max_subepoch: int = 30
     neural_init_epoch: int = 1
 
     # overwrite default opotions
@@ -41,8 +41,8 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     use_valence_emb: bool = True
     use_emb_as_w: bool = True
 
-    batch_size: int = 512
-    max_epoch: int = 100
+    batch_size: int = 256
+    max_epoch: int = 50
     early_stop: int = 10
     compare_field: str = 'likelihood'
     save_best: bool = True
@@ -52,7 +52,7 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     run_dev: bool = True
     run_test: bool = True
 
-    e_step_mode: str = 'em'
+    e_step_mode: str = 'viterbi'
     cv: int = 2
     count_smoothing: float = 0.1
     param_smoothing: float = 0.1
@@ -88,6 +88,9 @@ class LNDMVModel(Model):
 
     def train_one_step(self, epoch_id, batch_id, one_batch):
         batch_size = len(one_batch[0])
+
+        idx = np.arange(batch_size)
+
         id_array = one_batch[0]
         pos_array = cpasarray(one_batch[1])
         word_array = cpasarray(one_batch[2])
@@ -110,7 +113,8 @@ class LNDMVModel(Model):
             loss_current = 0.
             for i in range(0, batch_size, self.o.batch_size):
                 self.neural_m.optimizer.zero_grad()
-                sub_idx = slice(i, i + self.o.batch_size)
+                # sub_idx = slice(i, i + self.o.batch_size)
+                sub_idx = idx[i: i + self.o.batch_size]
                 arrays = {'pos': pos_array[sub_idx], 'word': word_array[sub_idx], 'len': len_array_gpu[sub_idx]}
                 traces = {'decision': dec_trace[sub_idx], 'transition': trans_trace[sub_idx]}
 
@@ -223,7 +227,7 @@ class LNDMVModelRunner(Runner):
             common.cpf = cp.float64
 
         m = LNDMVModel(o, self)
-        super().__init__(m, o, Logger())
+        super().__init__(m, o, Logger(o))
 
     def load_ds(self):
         word_vocab_list = [w.strip() for w in open(self.o.vocab_path)]

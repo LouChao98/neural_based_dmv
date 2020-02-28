@@ -1,7 +1,7 @@
 import os
 import dataclasses
 from utils.common import *
-from utils.functions import calculate_uas, cp2torch, torch2cp, use_torch_in_cupy_malloc, print_to_file
+from utils.functions import calculate_uas, cp2torch, print_to_file, set_seed, torch2cp, use_torch_in_cupy_malloc
 from utils.runner import Runner, Model, Logger, RunnerOptions
 from utils.data import ConllDataset, WSJ_POS
 from module.dmv import DMV, DMVOptions
@@ -22,6 +22,8 @@ class NMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     train_ds: str = 'data/wsj10_tr'
     dev_ds: str = 'data/wsj10_d'
     test_ds: str = 'data/wsj10_te'
+    num_tag: int = 34
+    max_len: int = 10
 
     dim_pos_emb: int = 20
     dim_valence_emb: int = 10
@@ -34,17 +36,18 @@ class NMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     use_valence_emb: bool = True
 
     batch_size: int = 256
-    max_epoch: int = 100
+    max_epoch: int = 50
     early_stop: int = 10
     compare_field: str = 'likelihood'
     save_best: bool = True
     show_log: bool = True
+    save_log: bool = True
 
     run_dev: bool = True
     run_test: bool = True
 
-    e_step_mode: str = 'em'
-    cv: int = 1
+    e_step_mode: str = 'viterbi'
+    cv: int = 2
     count_smoothing: float = 0.1
     param_smoothing: float = 0.1
 
@@ -97,8 +100,8 @@ class NDMVModel(Model):
             np.random.shuffle(idx)
             for i in range(0, batch_size, self.o.batch_size):
                 self.neural_m.optimizer.zero_grad()
-                # sub_idx = slice(i, i + self.o.batch_size)
-                sub_idx = idx[i: i + self.o.batch_size]
+                sub_idx = slice(i, i + self.o.batch_size)
+                # sub_idx = idx[i: i + self.o.batch_size]
                 arrays = {'pos': pos_array[sub_idx], 'len': len_array_gpu[sub_idx]}
                 traces = {'decision': dec_trace[sub_idx], 'transition': trans_trace[sub_idx]}
 
@@ -185,7 +188,6 @@ class NDMVModel(Model):
     def init_param(self, dataset):
         dataset.build_batchs(self.o.batch_size, same_len=True)
         self.dmv.init_param(dataset)
-        dataset.build_batchs(self.o.batch_size)
 
     def save(self, folder_path):
         self.dmv.save(folder_path)
@@ -206,18 +208,15 @@ class NDMVModelRunner(Runner):
             common.cpf = cp.float64
 
         m = NDMVModel(o, self)
-        super().__init__(m, o, Logger())
+        super().__init__(m, o, Logger(o))
 
     def load_ds(self):
-        self.train_ds = ConllDataset(self.o.train_ds, pos_vocab=WSJ_POS)
+        self.train_ds = ConllDataset(self.o.train_ds, pos_vocab=WSJ_POS, sort=True)
         self.dev_ds = ConllDataset(self.o.dev_ds, pos_vocab=WSJ_POS)
         self.test_ds = ConllDataset(self.o.test_ds, pos_vocab=WSJ_POS)
 
         self.dev_ds.build_batchs(self.o.batch_size)
         self.test_ds.build_batchs(self.o.batch_size)
-
-        self.o.max_len = 10
-        self.o.num_tag = len(WSJ_POS)
 
 
 if __name__ == '__main__':

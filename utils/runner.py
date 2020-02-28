@@ -64,12 +64,14 @@ class Logger:
     def _write(self, info):
         if self.o is None:
             print(info)
-        elif self.o.show_log:
+            return
+        if self.o.show_log:
             print(info)
-        elif self.o.save_log:
+        if self.o.save_log:
             if self._f is None:
-                self._f = open(self.o.workspace, 'a')
-                self._f.write(info + '\n')
+                self._f = open(self.o.workspace + '/log.txt', 'w')
+            self._f.write(info + '\n')
+            self._f.flush()
 
     def get_prefix(self, prefix=None, train_epoch=-1, is_dev=False, is_test=False):
         if prefix is not None:
@@ -163,10 +165,10 @@ class Runner:
         self.workspace = o.workspace
         make_sure_dir_exists(o.workspace)
         if o.save_best:
-            self.best_path = o.workspace + f'/best'
+            self.best_path = o.workspace + '/best'
             make_sure_dir_exists(self.best_path)
         if o.save_checkpoint_freq:
-            self.checkpoints_path = o.workspace + f'/checkpoints'
+            self.checkpoints_path = o.workspace + '/checkpoints'
             make_sure_dir_exists(self.checkpoints_path)
 
         self.best_epoch = -1
