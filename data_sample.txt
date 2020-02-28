@@ -1,0 +1,9 @@
+1	It	-	PRP	-	-	2	PRP	-	-	
+2	's	-	VBZ	-	-	0	VBZ	-	-	
+3	not	-	RB	-	-	2	RB	-	-	
+4	enough	-	RB	-	-	2	RB	-	-
+
+1	It	-	PRP	-	-	2	PRP	-	-	
+2	's	-	VBZ	-	-	0	VBZ	-	-	
+3	not	-	RB	-	-	2	RB	-	-	
+4	enough	-	RB	-	-	2	RB	-	-
