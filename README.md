@@ -1,6 +1,6 @@
 # Neural Based DMV
 
-Python reimplementations of a series of neural based dmv models.
+ Python reimplementations of a series of neural extensions of the Dependency Model with Valence (DMV) for unsupervised dependency parsing.
 
 Due to the difference in the framework, dataset processing methods and model implementation, we did not use the parameter settings in the paper and results are for reference only.
 

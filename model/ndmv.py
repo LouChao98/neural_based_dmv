@@ -15,7 +15,6 @@ class NMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     dmv_batch_size: int = 10000
     reset_neural: bool = True
     neural_stop_criteria: float = 0.05
-    model_stop_criteria: float = 1e-5
     neural_max_subepoch: int = 50
     neural_init_epoch: int = 1
 
