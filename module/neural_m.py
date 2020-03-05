@@ -4,9 +4,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from module.dmv import DMVOptions
-from utils.functions import make_mask, cp_mask_merge
-from utils.common import *
+from utils.functions import make_mask
 
 
 @dataclass
@@ -91,8 +89,7 @@ class Encoder(nn.Module):
         def encode(h, len_array):
             batch_size, max_len, *_ = h.shape
             h = h.transpose(1, 0).contiguous()
-            h = nn.utils.rnn.pack_padded_sequence(
-                h, len_array, enforce_sorted=False)
+            h = nn.utils.rnn.pack_padded_sequence(h, len_array, enforce_sorted=False)
             h = net(h)[0]
             h = nn.utils.rnn.pad_packed_sequence(h)[0]
             h = h.transpose(1, 0).contiguous()
@@ -118,33 +115,22 @@ class Encoder(nn.Module):
 
 
 class NeuralM(nn.Module):
-    def __init__(self, o: NeuralMOptions):
+    def __init__(self, o: NeuralMOptions, word_emb=None, out_pos_emb=None):
         super().__init__()
         self.o = o
-        self.mode = o.e_step_mode
-        self.use_direction_emb = o.use_direction_emb
-
-        self.num_lex = o.num_lex
-        self.num_pos = o.num_tag - self.num_lex
         self.cv = o.cv
-
         self.emb_dim = 0
-        self.hidden_dim = o.dim_hidden
 
-        if self.num_lex > 0:
-            self.word_idx, self.pos_idx = None, None
-
+        num_pos = o.num_tag - o.num_lex
         assert o.use_word_emb or o.use_pos_emb
 
         if o.use_word_emb:
-            if hasattr(self.o, 'emb_path') and self.o.emb_path:
-                word_emb = nn.Parameter(torch.tensor(np.load(self.o.emb_path), dtype=torch.float))
-                word_emb.requires_grad = not o.freeze_word_emb
+            if word_emb is not None:
+                word_emb = nn.Embedding.from_pretrained(torch.tensor(
+                    word_emb, dtype=torch.float), freeze=o.freeze_word_emb)
+                self.word_encoder = Encoder(word_emb, True)
             else:
-                word_emb = nn.Parameter(torch.empty(self.o.num_lex + 2, self.o.dim_word_emb))
-                nn.init.normal_(word_emb)
-            word_emb = nn.Embedding.from_pretrained(word_emb)
-            self.word_encoder: Encoder = Encoder(word_emb)
+                self.word_encoder = Encoder(nn.Embedding(self.o.num_lex + 2, o.dim_word_emb))
             if o.encoder_mode == 'lstm':
                 self.word_encoder.build_lstm_encoder(o.encoder_lstm_dim_hidden, o.encoder_lstm_num_layers,
                                                      o.encoder_lstm_dropout)
@@ -153,19 +139,15 @@ class NeuralM(nn.Module):
             else:
                 raise ValueError("the encoder only supports (lstm, empty)")
             self.emb_dim += self.word_encoder.out_dim
-        else:
-            self.word_encoder = None
 
         if o.use_sentence_emb:
             assert o.use_word_emb, 'if use sentence emb, must use word emb'
             self.emb_dim += self.word_encoder.out_dim
 
         if o.use_pos_emb:
-            self.pos_encoder: Encoder = Encoder(nn.Embedding(self.num_pos, o.dim_pos_emb))
+            self.pos_encoder: Encoder = Encoder(nn.Embedding(num_pos, o.dim_pos_emb))
             self.pos_encoder.build_empty_encoder()
             self.emb_dim += self.pos_encoder.out_dim
-        else:
-            self.pos_encoder = None
 
         if o.use_lan_emb:
             assert o.num_lan > 1, 'meanless option'
@@ -186,39 +168,37 @@ class NeuralM(nn.Module):
             self.cv_emb, self.dv_emb = None, None
 
         # must be the last emb because here will init nn.
-        if self.use_direction_emb:
+        if o.use_direction_emb:
             self.direction_emb = nn.Embedding(2, self.direction_dim)
             self.emb_dim += self.direction_dim
-            self.emb_linear = nn.Linear(self.emb_dim, self.hidden_dim)
+            self.emb_linear = nn.Linear(self.emb_dim, o.dim_hidden)
             self.left_right_linear = None
         else:
             self.direction_emb, self.emb_linear = None, None
-            self.left_right_linear = nn.Linear(self.emb_dim, 2 * self.hidden_dim)
+            self.left_right_linear = nn.Linear(self.emb_dim, 2 * o.dim_hidden)
 
-        self.decision_linear = nn.Linear(self.hidden_dim, o.dim_pre_out_decision)
+        self.decision_linear = nn.Linear(o.dim_hidden, o.dim_pre_out_decision)
         self.decision_out_linear = nn.Linear(o.dim_pre_out_decision, 2)
 
         if o.use_emb_as_w:
             w_dim = 0
-            # if o.use_pos_emb:
-            #     w_dim += o.dim_pos_emb
             if o.use_word_emb:
                 w_dim += o.dim_word_emb
             if self.o.dim_pre_out_child != w_dim:
                 print(f"overwrite o.dim_pre_out_child to {w_dim} because o.use_emb_as_w = True")
             o.dim_pre_out_child = w_dim
 
-            if hasattr(self.o, 'pos_emb_path') and self.o.pos_emb_path:
-                self.pos_emb_out = nn.Parameter(torch.tensor(np.load(self.o.pos_emb_path), dtype=torch.float))
+            if out_pos_emb is not None:
+                self.pos_emb_out = nn.Parameter(torch.tensor(out_pos_emb, dtype=torch.float))
             else:
-                self.pos_emb_out = nn.Parameter(torch.empty(self.num_pos, o.dim_pre_out_child))
+                self.pos_emb_out = nn.Parameter(torch.empty(num_pos, o.dim_pre_out_child))
                 nn.init.normal_(self.pos_emb_out.data)
 
-            self.child_linear = nn.Linear(self.hidden_dim, o.dim_pre_out_child)
+            self.child_linear = nn.Linear(o.dim_hidden, o.dim_pre_out_child)
             self.child_out_linear = None  # see build_child_out_linear
             self.child_pos_emb = None
         else:
-            self.child_linear = nn.Linear(self.hidden_dim, o.dim_pre_out_child)
+            self.child_linear = nn.Linear(o.dim_hidden, o.dim_pre_out_child)
             self.child_out_linear = nn.Linear(o.dim_pre_out_child, o.num_tag)
 
         self.activate = F.relu
@@ -267,14 +247,11 @@ class NeuralM(nn.Module):
         len_mask = make_mask(len_array, max_len)
 
         if traces is None:
-            expanded, d, v, _ = self.prepare_decision(
-                to_expand, len_mask, batch_size, max_len)
-            decision_param = self.real_forward(
-                expanded[:], d, v, True).reshape(batch_size, max_len, 2, 2, 2)
+            expanded, d, v, _ = self.prepare_decision(to_expand, len_mask, batch_size, max_len)
+            decision_param = self.real_forward(expanded[:], d, v, True).reshape(batch_size, max_len, 2, 2, 2)
 
             if self.cv != 2:
-                expanded, d, v, _ = self.prepare_trainsition(
-                    to_expand, len_mask, batch_size, max_len)
+                expanded, d, v, _ = self.prepare_trainsition(to_expand, len_mask, batch_size, max_len)
             h = self.real_forward(expanded, d, v, False)
             transition_param = self.transition_param_helper(group_ids, h, valid_direction=True)
 
@@ -283,29 +260,19 @@ class NeuralM(nn.Module):
         loss = torch.tensor(0., device='cuda')
 
         decision_trace = traces['decision']
-        # decision_mask = torch.ones(decision_trace.shape, device='cuda', dtype=torch.bool)
-        # decision_mask[:, 0, 0, :, GO] = 0
-        # decision_mask[torch.arange(batch_size), len_array - 1, 1, :, GO] = 0
         decision_trace = decision_trace.view(-1)
 
-        expanded, d, v, mask = self.prepare_decision(
-            to_expand, len_mask, batch_size, max_len)
+        expanded, d, v, mask = self.prepare_decision(to_expand, len_mask, batch_size, max_len)
         h = self.real_forward(expanded[:], d, v, True).view(-1)
         loss += self.loss(h, decision_trace, mask)  # & decision_mask.view(-1))
 
         transition_trace = traces['transition']
-        # trace_mask = torch.ones(traces['transition'].shape, device='cuda', dtype=torch.bool)
-        # for i in range(max_len):
-        #   trace_mask[:, i, :i + 1, 1] = 0
-        #   trace_mask[:, i, i:, 0] = 0
         transition_trace = transition_trace.view(-1)
 
         if self.cv != 2:
-            expanded, d, v, mask = self.prepare_trainsition(
-                to_expand, len_mask, batch_size, max_len)
+            expanded, d, v, mask = self.prepare_trainsition(to_expand, len_mask, batch_size, max_len)
         else:
-            *_, mask = self.prepare_trainsition(to_expand,
-                                                len_mask, batch_size, max_len, only_mask=True)
+            *_, mask = self.prepare_trainsition(to_expand, len_mask, batch_size, max_len, only_mask=True)
         h = self.real_forward(expanded, d, v, False)
         h = self.transition_param_helper(group_ids, h, valid_direction=False).view(-1)
         loss += self.loss(h, transition_trace, mask)  # & trace_mask.view(-1))
@@ -314,13 +281,13 @@ class NeuralM(nn.Module):
     def real_forward(self, emb_buffer, direction, valence, is_decision):
         emb_buffer.append(self.dv_emb(valence)
                           if is_decision else self.cv_emb(valence))
-        if self.use_direction_emb:
+        if self.o.use_direction_emb:
             emb_buffer.append(self.direction_emb(direction))
         h = torch.cat(emb_buffer, dim=-1)
         del emb_buffer
 
         h = self.dropout(h)
-        if self.use_direction_emb:
+        if self.o.use_direction_emb:
             h = self.activate(self.emb_linear(h))
         else:
             left_right_h = self.activate(self.left_right_linear(h))
@@ -337,11 +304,8 @@ class NeuralM(nn.Module):
                 self.activate(self.decision_linear(h)))
         else:
             if self.o.use_emb_as_w:
-                # w_pos = self.child_pos_emb(self.pos_idx)
-                w_word = torch.cat(
-                    [self.pos_emb_out, self.word_encoder.emb(self.word_idx)])
-                # w = torch.cat([w_pos, w_word], dim=1).T
-                w = w_word.T
+                w = torch.cat([self.pos_emb_out, self.word_encoder.emb(self.word_idx)])
+                w = w.T
                 h = torch.mm(self.activate(self.child_linear(h)), w)
             else:
                 h = self.child_out_linear(self.activate(self.child_linear(h)))
@@ -407,12 +371,10 @@ class NeuralM(nn.Module):
     def transition_param_helper(self, group_ids, forward_output, valid_direction=False):
         """convert (batch, seq_len, 2, self.cv, num_tag) to (batch, seq_len, seq_len, [direction,] self.cv)"""
         batch_size, max_len = group_ids.shape
-        forward_output = forward_output.view(
-            batch_size, max_len, 2, self.cv, self.o.num_tag)
+        forward_output = forward_output.view(batch_size, max_len, 2, self.cv, self.o.num_tag)
         index = group_ids.view(batch_size, 1, 1, 1,
                                max_len).expand(-1, max_len, 2, self.cv, -1)
-        h = torch.gather(forward_output, 4, index).permute(
-            0, 1, 4, 2, 3).contiguous()
+        h = torch.gather(forward_output, 4, index).permute(0, 1, 4, 2, 3).contiguous()
         if valid_direction:
             index = torch.ones(batch_size, max_len, max_len,
                                1, self.cv, dtype=torch.long, device='cuda')
@@ -422,19 +384,12 @@ class NeuralM(nn.Module):
         return h
 
     def set_lex(self, word_idx, pos_idx):
-        # assert w`ord_idx.shape == pos_idx.shape
         self.word_idx = word_idx
-        # self.pos_idx = torch.cat(
-        #     [torch.arange(self.num_pos, device=pos_idx.device), pos_idx])
         if self.o.use_emb_as_w:
             if self.o.use_word_emb and self.o.freeze_word_emb:
                 self.prefetched_word_emb = self.word_encoder.emb(word_idx)
-            # if self.o.use_pos_emb:
-            #     self.child_pos_emb = nn.Embedding(
-            #         self.num_pos, self.pos_dim) if self.o.use_child_pos_emb else self.pos_encoder.emb
 
     def reduce_lr_rate(self):
-        print('lr reduced')
         self.lr *= self.lr_decay
         for param_group in self.optimizer.param_groups:
             param_group['lr'] *= self.lr_decay
@@ -445,12 +400,10 @@ class NeuralM(nn.Module):
             param_group['lr'] *= self.lr
 
     def save(self, path):
-        torch.save({'model_state_dict': self.state_dict()},
-                   os.path.join(path, 'model'))
+        torch.save(self.state_dict(), os.path.join(path, 'model'))
 
     def load(self, path):
-        self.load_state_dict(torch.load(os.path.join(path, 'model'))[
-                             'model_state_dict'])
+        self.load_state_dict(torch.load(os.path.join(path, 'model')))
 
     def reset(self):
         if self.o.use_word_emb:
@@ -463,7 +416,7 @@ class NeuralM(nn.Module):
             self.cv_emb.reset_parameters()
             if self.dv_emb is not self.cv_emb:
                 self.dv_emb.reset_parameters()
-        if self.use_direction_emb:
+        if self.o.use_direction_emb:
             self.direction_emb.reset_parameters()
             self.emb_linear.reset_parameters()
         else:
@@ -474,8 +427,6 @@ class NeuralM(nn.Module):
 
         self.child_linear.reset_parameters()
         if self.o.use_emb_as_w:
-            # if self.o.use_pos_emb and self.o.use_child_pos_emb is True:
-            #     self.child_pos_emb.reset_parameters()
             nn.init.normal_(self.pos_emb_out.data)
         else:
             self.child_out_linear.reset_parameters()

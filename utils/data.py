@@ -3,6 +3,8 @@ import random
 from collections import Counter
 from itertools import groupby
 from utils.common import *
+import pickle
+from typing import Iterable
 
 
 class Vocab:
@@ -129,6 +131,9 @@ class ConllInstance:
     def __str__(self):
         return f'ConllInstance(str={" ".join(self.__getattr__("norm"))})'
 
+    def __hash__(self):
+        return hash('\t'.join(self.form))
+
     def __getattr__(self, item):
         if item == 'pos_np':
             if self._pos_np is None:
@@ -149,7 +154,7 @@ class ConllInstance:
             raw_entries.append(str(e))
         return '\n'.join(raw_entries)
 
-    def remove_entry(self, id):
+    def remove_entry(self, id, no_error=False):
         """
 
         :param idx: entry.id
@@ -161,7 +166,10 @@ class ConllInstance:
             if e.id == id:
                 continue
             if e.parent_id == id:
-                raise RuntimeError(f"remove {id} will make bad arc")
+                if no_error:
+                    e.parent_id = -1
+                else:
+                    raise RuntimeError(f"remove {id} will make bad arc")
             if e.parent_id > id:
                 e.parent_id -= 1
             if e.id > id:
@@ -172,7 +180,7 @@ class ConllInstance:
 
 class ConllDataset:
     def __init__(self, path, word_vocab=None, pos_vocab=None, sort=False,
-                 min_len=0, max_len=70):
+                 min_len=0, max_len=10000):
         self.path = path
 
         self.word_vocab = word_vocab
@@ -269,7 +277,7 @@ class ConllDataset:
                 else:
                     word_array = None
 
-                batch_data.append((id_array, pos_array, word_array, len_array))
+                batch_data.append([id_array, pos_array, word_array, len_array])
             return batch_data
 
         if same_len:
@@ -315,3 +323,35 @@ class ConllDataset:
         random.shuffle(self.instances)
         for id, instance in enumerate(self.instances):
             instance.id = id
+
+
+class ConllDatasetWithEmbedding(ConllDataset):
+    def __init__(self, path, emb_path, word_vocab=None, pos_vocab=None, min_len=0, max_len=70):
+        super().__init__(path, word_vocab, pos_vocab, False, min_len, max_len)
+
+        # load embedding, should be List[np.ndarray(n_layer, len, dim)]
+        with open(emb_path, 'rb') as f:
+            self.emb = pickle.load(f)
+        self.emb_dim = self.emb[0].shape[1]
+
+    def build_batchs(self, batch_size, layers=-1, same_len=False, shuffle=False):
+        super().build_batchs(batch_size, same_len=same_len, shuffle=shuffle)
+        for one_batch in self.batch_data:
+            id_array = one_batch[0]
+            len_array = one_batch[3]
+            batch_size, real_len = one_batch[1].shape
+
+            if not isinstance(layers, Iterable):
+                layers = [layers]
+            for layer_idx in layers:
+                padded_emb = npfempty((batch_size, real_len, self.emb_dim))
+                for i in range(batch_size):
+                    padded_emb[i, :len_array[i]] = self.emb[id_array[i]][layer_idx]
+                one_batch.append(padded_emb)
+        return self.batch_data
+
+    def shuffle(self):
+        print('ConllDatasetWithEmbedding do not support shuffle')
+
+    def sort_by_len(self):
+        print('ConllDatasetWithEmbedding do not support sort_by_len')

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import cupyx as cpx
 
+from numba import njit, prange
 from utils.common import *
 from utils.options import Options
 from module.eisner import constituent_index, batch_inside, batch_outside, batch_parse
@@ -235,6 +236,7 @@ class DMV:
             self.softmax_em_step()
 
     def init_param(self, dataset, getter=None):
+        # require same_len
         harmonic_sum = [0., 1.]
 
         def get_harmonic_sum(n):
@@ -275,7 +277,7 @@ class DMV:
             if getter:
                 pos_array = getter(arrays)
             else:
-                pos_array = arrays[1]
+                pos_array = cpasarray(arrays[1])
 
             batch_size, word_num = pos_array.shape
             change.fill(0.)
@@ -314,6 +316,43 @@ class DMV:
         cp.log(self.trans_param, out=self.trans_param)
         cp.log(self.root_param, out=self.root_param)
         cp.log(self.dec_param, out=self.dec_param)
+
+    def init_pretrained(self, dataset, getter=None):
+
+        def recovery_one(heads):
+            left_most = np.arange(len(heads))
+            right_most = np.arange(len(heads))
+            for idx, each_head in enumerate(heads[1:]):
+                if idx < left_most[each_head]:
+                    left_most[each_head] = idx
+                if idx > right_most[each_head]:
+                    right_most[each_head] = idx
+
+            valences = np.empty((len(heads), 2), dtype=np.int)
+            head_valences = np.empty(len(heads), dtype=np.int)
+
+            for idx, each_head in enumerate(heads):
+                valences[idx, 0] = NOCHILD if left_most[idx] == idx else HASCHILD
+                valences[idx, 1] = NOCHILD if right_most[idx] == idx else HASCHILD
+                if each_head > idx:  # d = 0
+                    head_valences[idx] = NOCHILD if left_most[each_head] == idx else HASCHILD
+                else:
+                    head_valences[idx] = NOCHILD if right_most[each_head] == idx else HASCHILD
+            return valences, head_valences
+
+        heads = npiempty((len(dataset), self.o.max_len + 1))
+        valences = npiempty((len(dataset), self.o.max_len + 1, 2))
+        head_valences = npiempty((len(dataset), self.o.max_len + 1))
+
+        for idx, instance in enumerate(dataset.instance):
+            one_heads = npiempty(instance.len + 1)
+            one_heads[0] = -1
+            one_heads[1:] = instance.parent_id
+            one_valences, one_head_valences = recovery_one(one_heads)
+            heads[idx] = heads
+            valences[idx] = one_valences
+            head_valences = one_head_valences
+            print('checkpoint')
 
     def apply_child_backoff(self, transition_counter):
         """backoffs      [1, child_pos, directoin, cv]"""

@@ -15,8 +15,7 @@ def get_tag_id_converter(word_idx, num_pos):
 
     def converter(word_array, pos_array):
         in_mask = cp.in1d(word_array, word_idx).reshape(word_array.shape)
-        group_array = cp_mask_merge(
-            word_array - 2 + num_pos, pos_array, in_mask)
+        group_array = cp_mask_merge(word_array - 2 + num_pos, pos_array, in_mask)
         return group_array
 
     return converter
@@ -137,3 +136,15 @@ def make_sure_dir_exists(path):
         os.makedirs(path)
     elif not os.path.isdir(path):
         raise RuntimeError(f"{path} is exists but not a directory")
+
+
+def kl_between_gaussian(mean1, cov1, mean2, cov2):
+    # all args have the same shape
+    batch_size, real_len, tag_dim = mean1.shape
+
+    mean_diff = (mean1 - mean2)
+    cov2_inv = 1 / cov2
+
+    kl = 0.5 * (torch.log(cov2) - torch.log(cov1) - 1 + cov1 * cov2_inv
+                + torch.pow(mean_diff, 2) * cov2_inv)
+    return kl

@@ -283,9 +283,8 @@ def batch_parse(trans_scores, dec_scores, len_array):
     backtracking(
         ((batch_size + 255) // 256,), (256,),
         (incomplete_backtrack, complete_backtrack, heads,
-         head_valences, valences, merged_is, merged_is_index, merged_cs,
-         merged_cs_index, root_id, id2span, stack, shape))
-
+            head_valences, valences, merged_is, merged_is_index, merged_cs,
+            merged_cs_index, root_id, id2span, stack, shape))
     return heads, head_valences, valences
 
 

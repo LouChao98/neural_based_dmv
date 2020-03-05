@@ -70,6 +70,7 @@ class NDMVModel(Model):
         dataset.build_batchs(self.o.dmv_batch_size, False, True)
         if self.o.reset_neural:
             self.neural_m.reset()
+            # self.neural_m = NeuralM(self.o).cuda()
         if self.dmv.initializing and epoch_id >= self.o.neural_init_epoch:
             self.dmv.initializing = False
             self.r.logger.write("finishing initialization")
@@ -210,7 +211,7 @@ class NDMVModelRunner(Runner):
         m = NDMVModel(o, self)
         super().__init__(m, o, Logger(o))
 
-    def load_ds(self):
+    def load(self):
         self.train_ds = ConllDataset(self.o.train_ds, pos_vocab=WSJ_POS, sort=True)
         self.dev_ds = ConllDataset(self.o.dev_ds, pos_vocab=WSJ_POS)
         self.test_ds = ConllDataset(self.o.test_ds, pos_vocab=WSJ_POS)
@@ -224,10 +225,4 @@ if __name__ == '__main__':
     options = NMDVModelOptions()
     options.parse()
     runner = NDMVModelRunner(options)
-    try:
-        runner.start()
-    except KeyboardInterrupt:
-        print()
-        runner.evaluate('test')
-        print('cleanning')
-        runner.clean()
+    runner.start()

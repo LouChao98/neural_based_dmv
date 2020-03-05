@@ -1,6 +1,7 @@
 dev/
 output/
 data/
+data
 .vscode/
 
 # Byte-compiled / optimized / DLL files

@@ -114,7 +114,7 @@ class DMVModelRunner(Runner):
         m = DMVModel(o, self)
         super().__init__(m, o, Logger())
 
-    def load_ds(self):
+    def load(self):
         self.train_ds = ConllDataset(self.o.train_ds, pos_vocab=WSJ_POS)
         self.dev_ds = ConllDataset(self.o.dev_ds, pos_vocab=WSJ_POS)
         self.test_ds = ConllDataset(self.o.test_ds, pos_vocab=WSJ_POS)
@@ -130,8 +130,4 @@ if __name__ == '__main__':
     options = DMVModelOptions()
     options.parse()
     runner = DMVModelRunner(options)
-    try:
-        runner.start()
-    except KeyboardInterrupt:
-        print('\ncleanning')
-        runner.clean()
+    runner.start()

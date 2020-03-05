@@ -94,7 +94,7 @@ class Logger:
     def write(self, info, *, time=None, prefix=None, train_epoch=-1, is_dev=False, is_test=False):
         prefix = self.get_prefix(prefix, train_epoch, is_dev, is_test)
         suffix = f'({time:.3f}s)' if time else ''
-        return self._write(' '.join([prefix, info, suffix]))
+        self._write(' '.join([prefix, info, suffix]))
 
     def write_result(self, result, *, prefix=None, time=None, train_epoch=-1, is_dev=False, is_test=False):
         prefix = self.get_prefix(prefix, train_epoch, is_dev, is_test)
@@ -146,7 +146,7 @@ class Runner:
         self.train_ds = None
         self.dev_ds = None
         self.test_ds = None
-        self.load_ds()
+        self.load()
         self.model.build()
 
         # recovery
@@ -244,7 +244,7 @@ class Runner:
                                  is_dev=(mode == 'dev'), is_test=(mode == 'test'))
         return result
 
-    def load_ds(self):
+    def load(self):
         # write to self.train_ds, self.dev_ds, self.test_ds
         raise NotImplementedError
 
@@ -299,7 +299,12 @@ class Runner:
 
     def start(self):
         if self.o.max_epoch:
-            self.train()
+            try:
+                self.train()
+            except KeyboardInterrupt:
+                if self.o.run_test:
+                    print()
+                    self.evaluate('test')
         else:
             if self.o.run_dev:
                 self.evaluate('dev')
