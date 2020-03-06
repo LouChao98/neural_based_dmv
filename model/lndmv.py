@@ -26,17 +26,18 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     neural_max_subepoch: int = 50
     neural_init_epoch: int = 1
 
+    pretrained_ds = 'data/wsj10_tr_pred'
+
     # overwrite default opotions
-    # train_ds: str = 'data/bllip_conll/bllip10clean_20k.conll'
-    train_ds: str = 'data/wsj10_tr'
-    dev_ds: str = 'data/wsj10_d'  # _retag'
-    test_ds: str = 'data/wsj10_te'  # _retag'
+    train_ds: str = 'data/bllip_conll/bllip10clean_20k.conll'
+    dev_ds: str = 'data/wsj10_d_retag'
+    test_ds: str = 'data/wsj10_te_retag'
     num_lex: int = 390  # not include <UNK> <PAD>
 
     dim_pos_emb: int = 20
     dim_word_emb: int = 100
     dim_valence_emb: int = 20
-    dim_hidden: int = 200
+    dim_hidden: int = 128
     dim_pre_out_decision: int = 32
     dim_pre_out_child: int = 100
     dropout: float = 0.3
@@ -87,6 +88,9 @@ class LNDMVModel(Model):
         dataset.build_batchs(self.o.dmv_batch_size, False, True)
         if self.o.reset_neural:
             self.build(nn_only=True)
+        if self.dmv.initializing:
+            self.r.best = None
+            self.r.best_epoch = -1
         if self.dmv.initializing and epoch_id >= self.o.neural_init_epoch:
             self.dmv.initializing = False
             self.r.logger.write("finishing initialization")
@@ -211,9 +215,13 @@ class LNDMVModel(Model):
         return {'uas': acc * 100, 'likelihood': ll}
 
     def init_param(self, dataset):
-        dataset.build_batchs(self.o.batch_size, same_len=True)
         word_idx = cp.arange(2, len(dataset.word_vocab))
-        self.dmv.init_param(dataset, get_init_param_converter(word_idx, len(dataset.pos_vocab)))
+        converter = get_init_param_converter(word_idx, len(dataset.pos_vocab))
+        if self.r.pretrained_ds:
+            self.dmv.init_pretrained(self.r.pretrained_ds, converter)
+        else:
+            dataset.build_batchs(self.o.batch_size, same_len=True)
+            self.dmv.init_param(dataset, converter)
 
     def save(self, folder_path):
         self.dmv.save(folder_path)
@@ -244,6 +252,11 @@ class LNDMVModelRunner(Runner):
         self.dev_ds = ConllDataset(self.o.dev_ds, pos_vocab=BLLIP_POS, word_vocab=word_vocab)
         self.test_ds = ConllDataset(self.o.test_ds, pos_vocab=BLLIP_POS, word_vocab=word_vocab)
 
+        if self.o.pretrained_ds:
+            self.pretrained_ds = ConllDataset(self.o.pretrained_ds, pos_vocab=BLLIP_POS, word_vocab=word_vocab)
+        else:
+            self.pretrained_ds = None
+
         self.dev_ds.build_batchs(self.o.batch_size)
         self.test_ds.build_batchs(self.o.batch_size)
 
@@ -257,13 +270,6 @@ class LNDMVModelRunner(Runner):
         self.pos_emb = np.load(self.o.pos_emb_path) if self.o.pos_emb_path else None
 
 
-# word2vec->performance (freeze)
-# iter1->57.92
-# iter10->61.58
-# iter50->60.66
-# iter100->61.84
-
-
 if __name__ == '__main__':
     use_torch_in_cupy_malloc()
 
@@ -271,4 +277,7 @@ if __name__ == '__main__':
     options.parse()
 
     runner = LNDMVModelRunner(options)
+    if options.pretrained_ds:
+        runner.logger.write('init with acc:')
+        runner.evaluate('test')
     runner.start()

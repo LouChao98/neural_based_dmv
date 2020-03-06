@@ -322,7 +322,12 @@ class DMV:
         def recovery_one(heads):
             left_most = np.arange(len(heads))
             right_most = np.arange(len(heads))
-            for idx, each_head in enumerate(heads[1:]):
+            for idx, each_head in enumerate(heads):
+                if each_head in (0, len(heads) + 1):  # skip head is ROOT
+                    continue
+                else:
+                    each_head -= 1
+                assert each_head >= 0
                 if idx < left_most[each_head]:
                     left_most[each_head] = idx
                 if idx > right_most[each_head]:
@@ -332,6 +337,10 @@ class DMV:
             head_valences = np.empty(len(heads), dtype=np.int)
 
             for idx, each_head in enumerate(heads):
+                if each_head in (0, len(heads) + 1):
+                    continue
+                else:
+                    each_head -= 1
                 valences[idx, 0] = NOCHILD if left_most[idx] == idx else HASCHILD
                 valences[idx, 1] = NOCHILD if right_most[idx] == idx else HASCHILD
                 if each_head > idx:  # d = 0
@@ -344,15 +353,55 @@ class DMV:
         valences = npiempty((len(dataset), self.o.max_len + 1, 2))
         head_valences = npiempty((len(dataset), self.o.max_len + 1))
 
-        for idx, instance in enumerate(dataset.instance):
-            one_heads = npiempty(instance.len + 1)
-            one_heads[0] = -1
-            one_heads[1:] = instance.parent_id
+        for idx, instance in enumerate(dataset.instances):
+            one_heads = npasarray(list(map(int, instance.misc)))
             one_valences, one_head_valences = recovery_one(one_heads)
-            heads[idx] = heads
-            valences[idx] = one_valences
-            head_valences = one_head_valences
-            print('checkpoint')
+            heads[idx, 1:instance.len + 1] = one_heads
+            valences[idx, 1:instance.len + 1] = one_valences
+            head_valences[idx, 1:instance.len + 1] = one_head_valences
+
+        heads = cpasarray(heads)
+        valences = cpasarray(valences)
+        head_valences = cpasarray(head_valences)
+
+        batch_size, sentence_len = heads.shape
+        len_array = cpasarray(dataset.get_len())
+        batch_arange = cp.arange(batch_size)
+
+        save_batch_data = dataset.batch_data
+        dataset.build_batchs(len(dataset), same_len=False, shuffle=False)
+        tag_array = getter(dataset.batch_data[0])
+        dataset.batch_data = save_batch_data
+
+        self.reset_root_counter()
+        self.batch_trans_trace = cpfzeros((batch_size, self.o.max_len, self.o.max_len, 2, self.o.cv))
+        self.batch_dec_trace = cpfzeros((batch_size, self.o.max_len, self.o.max_len, 2, 2, 2))
+
+        for m in range(1, sentence_len):
+            h = heads[:, m]
+            direction = (h <= m).astype(cpi)
+            h_valence = head_valences[:, m]
+            m_valence = valences[:, m]
+            m_child_valence = h_valence if self.o.cv > 1 else cp.zeros_like(h_valence)
+
+            len_mask = ((h <= len_array) & (m <= len_array))
+
+            self.batch_dec_trace[batch_arange, m - 1, m - 1, 0, m_valence[:, 0], STOP] = len_mask
+            self.batch_dec_trace[batch_arange, m - 1, m - 1, 1, m_valence[:, 1], STOP] = len_mask
+
+            head_mask = h == 0
+            mask = head_mask * len_mask
+            if mask.any():
+                cpx.scatter_add(self.root_counter, tag_array[:, m - 1], mask)
+
+            head_mask = ~head_mask
+            mask = head_mask * len_mask
+            if mask.any():
+                self.batch_trans_trace[batch_arange, h - 1, m - 1, direction, m_child_valence] = mask
+                self.batch_dec_trace[batch_arange, h - 1, m - 1, direction, h_valence, GO] = mask
+
+        d, t = self.get_batch_counter_by_tag(tag_array, mode=1)
+        self.m_step(t[0], d[0])
 
     def apply_child_backoff(self, transition_counter):
         """backoffs      [1, child_pos, directoin, cv]"""

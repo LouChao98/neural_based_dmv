@@ -79,7 +79,7 @@ class ConllEntry:
         "pred_parent_id", "pred_relation")
 
     def __init__(self, id, form, lemma, pos, cpos, feats, parent_id,
-                 relation='-', deps='-', msic='-'):
+                 relation='-', deps='-', misc='-'):
         self.id = id
         self.form = form
         self.lemma = lemma
@@ -89,7 +89,7 @@ class ConllEntry:
         self.parent_id = parent_id
         self.relation = relation
         self.deps = deps
-        self.misc = msic
+        self.misc = misc
 
         self.norm = self.normalize(self.form)
         self.pred_parent_id = None
