@@ -20,16 +20,16 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     # NOT for converting pos array to vectors
     pos_emb_path: str = 'data/bllip_vec/posvectors.npy'
 
-    dmv_batch_size: int = 10240
+    dmv_batch_size: int = 20480
     reset_neural: bool = False
-    neural_stop_criteria: float = 0.001
+    neural_stop_criteria: float = 1e-4
     neural_max_subepoch: int = 50
     neural_init_epoch: int = 1
 
     pretrained_ds = 'data/wsj10_tr_pred'
 
     # overwrite default opotions
-    train_ds: str = 'data/bllip_conll/bllip10clean_20k.conll'
+    train_ds: str = 'data/bllip_conll/bllip10clean_full.conll'
     dev_ds: str = 'data/wsj10_d_retag'
     test_ds: str = 'data/wsj10_te_retag'
     num_lex: int = 390  # not include <UNK> <PAD>
@@ -37,18 +37,18 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     dim_pos_emb: int = 20
     dim_word_emb: int = 100
     dim_valence_emb: int = 20
-    dim_hidden: int = 128
+    dim_hidden: int = 1024
     dim_pre_out_decision: int = 32
     dim_pre_out_child: int = 100
-    dropout: float = 0.3
-    lr: float = 0.01
+    dropout: float = 0.4
+    lr: float = 0.001
     use_pos_emb: bool = True
     use_word_emb: bool = True
     use_valence_emb: bool = True
     use_emb_as_w: bool = True
     freeze_word_emb: bool = True
 
-    batch_size: int = 2048
+    batch_size: int = 1024
     max_epoch: int = 100
     early_stop: int = 10
     compare_field: str = 'likelihood'

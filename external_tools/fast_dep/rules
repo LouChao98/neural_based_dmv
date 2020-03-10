@@ -1,0 +1,13 @@
+Root -> Auxiliary
+Root -> Verb
+Auxiliary -> Verb
+Verb -> Noun
+Verb -> Pronoun
+Verb -> Adverb
+Verb -> Verb
+Noun -> Adjective
+Noun -> Demonstrative
+Noun -> Number
+Noun -> Noun
+Adjective -> Adverb
+Adposition -> Noun

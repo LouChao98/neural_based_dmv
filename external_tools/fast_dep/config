@@ -1,0 +1,15 @@
+T	@T@
+count	100000
+beta	true 
+deps	deps_@lang@ 
+poses	poses_@lang@ 
+words	words_@lang@ 
+alpha_0	1 
+alpha_1	10 
+hyp	1 
+out_put	out_put 
+tag_set_map	map_@lang@ 
+rules	rules 
+neg_rules	dep_matrix.txt 
+dir_rules	dir_rules 
+threshold	@threshold@ 

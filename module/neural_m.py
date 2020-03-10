@@ -102,6 +102,21 @@ class Encoder(nn.Module):
         self.reset_func = reset
         self.out_dim = hidden_dim
 
+    def build_onetime_encoder(self, out_dim):
+        self.to_fetch = None
+
+        def encode(h, len_array):
+            assert self.to_fetch is not None
+            t = self.to_fetch
+            self.to_fetch = None
+            return t
+
+        def reset(self):
+            return
+        self.net = encode
+        self.reset_func = reset
+        self.out_dim = out_dim
+
     def reset(self):
         assert self.reset_func is not None, 'reset is undefined'
         self.reset_func()
@@ -136,8 +151,10 @@ class NeuralM(nn.Module):
                                                      o.encoder_lstm_dropout)
             elif o.encoder_mode == 'empty':
                 self.word_encoder.build_empty_encoder()
+            elif o.encoder_mode == 'onetime':
+                self.word_encoder.build_onetime_encoder(self.o.dim_word_emb)
             else:
-                raise ValueError("the encoder only supports (lstm, empty)")
+                raise ValueError("the encoder only supports (lstm, empty, onetime)")
             self.emb_dim += self.word_encoder.out_dim
 
         if o.use_sentence_emb:
@@ -214,14 +231,14 @@ class NeuralM(nn.Module):
         else:
             self.optimizer = None
 
-    def forward(self, arrays, group_ids, traces=None):
+    def forward(self, arrays, tag_array, traces=None):
         """
         :param arrays:
           a dict which contains arrays. 'id' and 'len' is necessary.
           There are a series of use_X_emb in options to control the usage of arrays.
-        :param group_ids:
+        :param tag_array:
           a array indicate word`s tag used in dmv, if num_lex=0,
-          group_ids should be the same as pos_array .
+          tag_array should be the same as pos_array .
         :param traces:
           a dict which contains traces.
           If given, forward in 'train' mode, or forward in 'predict' mode
@@ -253,7 +270,7 @@ class NeuralM(nn.Module):
             if self.cv != 2:
                 expanded, d, v, _ = self.prepare_trainsition(to_expand, len_mask, batch_size, max_len)
             h = self.real_forward(expanded, d, v, False)
-            transition_param = self.transition_param_helper(group_ids, h, valid_direction=True)
+            transition_param = self.transition_param_helper(tag_array, h, valid_direction=True)
 
             return decision_param, transition_param
 
@@ -274,7 +291,7 @@ class NeuralM(nn.Module):
         else:
             *_, mask = self.prepare_trainsition(to_expand, len_mask, batch_size, max_len, only_mask=True)
         h = self.real_forward(expanded, d, v, False)
-        h = self.transition_param_helper(group_ids, h, valid_direction=False).view(-1)
+        h = self.transition_param_helper(tag_array, h, valid_direction=False).view(-1)
         loss += self.loss(h, transition_trace, mask)  # & trace_mask.view(-1))
         return loss
 

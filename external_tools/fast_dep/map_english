@@ -1,0 +1,12 @@
+Noun: NNP NNPS NNS NN VBG
+Verb: VBZ VBD VB VBN VBP
+Adjective: JJ JJR JJS
+Adverb: RB RBS WRB RBR
+Demonstrative: WDT DT PRP$
+Number: CD
+Adposition: IN TO
+Pronoun: PRP WP
+Auxiliary: MD
+Conjunction: CC
+Extra: EX FW PDT POS RP UH $
+Root: #

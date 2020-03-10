@@ -1,0 +1,12 @@
+Noun: Noun-common Noun-proper
+Verb: Verb-main
+Adjective: Adjective-qualificative Adjective-possessive Adjective-ordinal
+Adverb: Adverb-general
+Demonstrative: Article Determiner
+Number: Numeral-cardinal Numeral-ordinal Numeral-multiple Numeral-special
+Adposition: Adposition-preposition
+Pronoun: Pronoun-personal Pronoun-demonstrative Pronoun-indefinite Pronoun-possessive Pronoun-interrogative Pronoun-relative Pronoun-reflexive Pronoun-negative Pronoun-general
+Auxiliary: Verb-modal Verb-copula
+Conjunction: Conjunction-coordinating Conjunction-subordinating
+Extra: Particle Interjection Abbreviation
+Root: #

@@ -332,7 +332,7 @@ class ConllDatasetWithEmbedding(ConllDataset):
         # load embedding, should be List[np.ndarray(n_layer, len, dim)]
         with open(emb_path, 'rb') as f:
             self.emb = pickle.load(f)
-        self.emb_dim = self.emb[0].shape[1]
+        self.emb_dim = self.emb[0].shape[-1]
 
     def build_batchs(self, batch_size, layers=-1, same_len=False, shuffle=False):
         super().build_batchs(batch_size, same_len=same_len, shuffle=shuffle)

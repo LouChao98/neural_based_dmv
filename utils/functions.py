@@ -139,7 +139,7 @@ def make_sure_dir_exists(path):
 
 
 def kl_between_gaussian(mean1, cov1, mean2, cov2):
-    # all args have the same shape
+    # broadcast supported on mean2, cov2
     batch_size, real_len, tag_dim = mean1.shape
 
     mean_diff = (mean1 - mean2)

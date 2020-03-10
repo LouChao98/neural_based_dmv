@@ -4,10 +4,10 @@ from dataclasses import dataclass
 
 import cupyx as cpx
 
-from numba import njit, prange
 from utils.common import *
 from utils.options import Options
 from module.eisner import constituent_index, batch_inside, batch_outside, batch_parse
+from utils.functions import cp2torch, torch2cp
 
 SOFTMAX_EM_SIGMA_TYPE = Union[float, Tuple[float, float, int]]
 
@@ -166,7 +166,7 @@ class DMV:
         return batch_likelihood
 
     def run_viterbi_estep(self, id_array, tag_array, len_array):
-        batch_size, sentence_len = tag_array.shape
+        batch_size, real_len = tag_array.shape
 
         trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
         if self.function_mask_set is not None:
@@ -178,7 +178,7 @@ class DMV:
         batch_arange = cp.arange(batch_size)
         batch_likelihood = cpfzeros(1)
 
-        for m in range(1, sentence_len):
+        for m in range(1, real_len):
             h = heads[:, m]
             direction = (h <= m).astype(cpi)
             h_valence = head_valences[:, m]
@@ -598,3 +598,62 @@ class DMV:
         batch_size = tag_array.shape[0]
         tag_array = cp.concatenate([cpizeros((batch_size, 1)), tag_array], axis=1)
         return tag_array
+
+
+class DMVWithGrad(torch.autograd.Function, DMV):
+    @staticmethod
+    def forward(ctx, dmv, trans_scores, dec_scores, tag_array: cp.ndarray, len_array: np.ndarray):
+        # base on viterbi e step
+        batch_size, real_len = tag_array.shape
+
+        cp_trans_scores = torch2cp(trans_scores)
+        cp_dec_scores = torch2cp(dec_scores)
+        # TODO add one more idx
+        heads, head_valences, valences = batch_parse(trans_scores, dec_scores, len_array)
+
+        len_array = cpasarray(len_array)
+        batch_arange = cp.arange(batch_size)
+        batch_likelihood = cpfzeros(1)
+
+        batch_trans_trace = cpfzeros((batch_size, real_len, real_len, 2, dmv.o.cv))
+        batch_dec_trace = cpfzeros((batch_size, real_len, real_len, 2, 2, 2))
+
+        for m in range(1, real_len):
+            h = heads[:, m]
+            direction = (h <= m).astype(cpi)
+            h_valence = head_valences[:, m]
+            m_valence = valences[:, m]
+            m_child_valence = h_valence if dmv.o.cv > 1 else cp.zeros_like(h_valence)
+
+            len_mask = ((h <= len_array) & (m <= len_array))
+
+            batch_likelihood += cp.sum(dec_scores[batch_arange, m, 0, m_valence[:, 0], STOP][len_mask])
+            batch_likelihood += cp.sum(dec_scores[batch_arange, m, 1, m_valence[:, 1], STOP][len_mask])
+            batch_dec_trace[batch_arange, m - 1, m - 1, 0, m_valence[:, 0], STOP] = len_mask
+            batch_dec_trace[batch_arange, m - 1, m - 1, 1, m_valence[:, 1], STOP] = len_mask
+
+            head_mask = h == 0
+            mask = head_mask * len_mask
+            if mask.any():
+                # when use_torch_in_cupy_malloc(), mask.any()=False will raise a NullPointer error
+                batch_likelihood += cp.sum(trans_scores[:, 0, m, 0][mask])
+                cpx.scatter_add(dmv.root_counter, tag_array[:, m], mask)
+
+            head_mask = ~head_mask
+            mask = head_mask * len_mask
+            if mask.any():
+                batch_likelihood += cp.sum(cp_trans_scores[batch_arange, h, m, m_child_valence][mask])
+                batch_likelihood += cp.sum(cp_dec_scores[batch_arange, h, direction, h_valence, GO][mask])
+                batch_trans_trace[batch_arange, h - 1, m - 1, direction, m_child_valence] = mask
+                batch_dec_trace[batch_arange, h - 1, m - 1, direction, h_valence, GO] = mask
+
+        batch_trans_trace = cp2torch(batch_trans_trace)
+        batch_dec_trace = cp2torch(batch_dec_trace)
+        ctx.save_for_backward(batch_trans_trace, batch_dec_trace)
+        return cp2torch(batch_likelihood)
+
+    @staticmethod
+    def backward(ctx, grad_batch_likelihood):
+        # TODO calculating count is done in forward, should I move it to here?
+        batch_trans_trace, batch_dec_trace = ctx.saved_tensors
+        return None, grad_batch_likelihood * batch_trans_trace, grad_batch_likelihood * batch_dec_trace, None, None
