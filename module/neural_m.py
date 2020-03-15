@@ -43,6 +43,7 @@ class NeuralMOptions:
     use_lan_emb: bool = False
 
     freeze_word_emb: bool = False
+    freeze_pos_emb: bool = False
 
     # if True, child_out_linear`s weight will be binded with POS emb and WORD emb(if available).
     #   described in NDMV, L-NDMV.
@@ -130,7 +131,7 @@ class Encoder(nn.Module):
 
 
 class NeuralM(nn.Module):
-    def __init__(self, o: NeuralMOptions, word_emb=None, out_pos_emb=None):
+    def __init__(self, o: NeuralMOptions, word_emb=None, out_pos_emb=None, pos_emb=None):
         super().__init__()
         self.o = o
         self.cv = o.cv
@@ -143,9 +144,10 @@ class NeuralM(nn.Module):
             if word_emb is not None:
                 word_emb = nn.Embedding.from_pretrained(torch.tensor(
                     word_emb, dtype=torch.float), freeze=o.freeze_word_emb)
-                self.word_encoder = Encoder(word_emb, True)
             else:
-                self.word_encoder = Encoder(nn.Embedding(self.o.num_lex + 2, o.dim_word_emb))
+                word_emb = nn.Embedding(self.o.num_lex + 2, o.dim_word_emb)
+            self.word_encoder = Encoder(word_emb, word_emb is not None)
+
             if o.encoder_mode == 'lstm':
                 self.word_encoder.build_lstm_encoder(o.encoder_lstm_dim_hidden, o.encoder_lstm_num_layers,
                                                      o.encoder_lstm_dropout)
@@ -155,6 +157,7 @@ class NeuralM(nn.Module):
                 self.word_encoder.build_onetime_encoder(self.o.dim_word_emb)
             else:
                 raise ValueError("the encoder only supports (lstm, empty, onetime)")
+
             self.emb_dim += self.word_encoder.out_dim
 
         if o.use_sentence_emb:
@@ -162,12 +165,17 @@ class NeuralM(nn.Module):
             self.emb_dim += self.word_encoder.out_dim
 
         if o.use_pos_emb:
-            self.pos_encoder: Encoder = Encoder(nn.Embedding(num_pos, o.dim_pos_emb))
-            self.pos_encoder.build_empty_encoder()
+            if pos_emb is not None:
+                pos_emb = nn.Embedding.from_pretrained(torch.tensor(
+                    pos_emb, dtype=torch.float), freeze=o.freeze_pos_emb)
+            else:
+                pos_emb = nn.Embedding(num_pos, o.dim_pos_emb)
+            self.pos_encoder: Encoder = Encoder(pos_emb, pos_emb is not None)
+            self.pos_encoder.build_empty_encoder()  # TODO
             self.emb_dim += self.pos_encoder.out_dim
 
         if o.use_lan_emb:
-            assert o.num_lan > 1, 'meanless option'
+            assert o.num_lan > 1, 'meaningless option'
             self.lan_emb = nn.Embedding(o.num_lan, o.dim_lan_emb)
             self.emb_dim += o.dim_lan_emb
 
@@ -181,8 +189,6 @@ class NeuralM(nn.Module):
                 self.cv_emb = nn.Embedding(self.cv, o.dim_valence_emb)
                 self.dv_emb = nn.Embedding(2, o.dim_valence_emb)
             self.emb_dim += o.dim_valence_emb
-        else:
-            self.cv_emb, self.dv_emb = None, None
 
         # must be the last emb because here will init nn.
         if o.use_direction_emb:
@@ -201,6 +207,12 @@ class NeuralM(nn.Module):
             w_dim = 0
             if o.use_word_emb:
                 w_dim += o.dim_word_emb
+            if o.use_pos_emb:
+                w_dim += o.dim_pos_emb
+
+            self.child_linear = nn.Linear(o.dim_hidden, o.dim_pre_out_child)
+
+            # for child_out_linear
             if self.o.dim_pre_out_child != w_dim:
                 print(f"overwrite o.dim_pre_out_child to {w_dim} because o.use_emb_as_w = True")
             o.dim_pre_out_child = w_dim
@@ -211,9 +223,6 @@ class NeuralM(nn.Module):
                 self.pos_emb_out = nn.Parameter(torch.empty(num_pos, o.dim_pre_out_child))
                 nn.init.normal_(self.pos_emb_out.data)
 
-            self.child_linear = nn.Linear(o.dim_hidden, o.dim_pre_out_child)
-            self.child_out_linear = None  # see build_child_out_linear
-            self.child_pos_emb = None
         else:
             self.child_linear = nn.Linear(o.dim_hidden, o.dim_pre_out_child)
             self.child_out_linear = nn.Linear(o.dim_pre_out_child, o.num_tag)
@@ -321,7 +330,13 @@ class NeuralM(nn.Module):
                 self.activate(self.decision_linear(h)))
         else:
             if self.o.use_emb_as_w:
-                w = torch.cat([self.pos_emb_out, self.word_encoder.emb(self.word_idx)])
+                w = []
+                if self.o.use_word_emb:
+                    w.append(torch.cat([self.pos_emb_out, self.word_encoder.emb(self.word_idx)]))
+                if self.o.use_pos_emb:
+                    all_pos = torch.arange(self.pos_encoder.emb.num_embeddings, device='cuda')
+                    w.append(torch.cat([self.pos_encoder.emb(all_pos), self.pos_encoder.emb(self.pos_idx)]))
+                w = torch.cat(w, dim=1)
                 w = w.T
                 h = torch.mm(self.activate(self.child_linear(h)), w)
             else:
@@ -401,10 +416,10 @@ class NeuralM(nn.Module):
         return h
 
     def set_lex(self, word_idx, pos_idx):
+        # the order MUST match the converter
+        # (word_idx[0], pos_idx[0])=num_pos ...
         self.word_idx = word_idx
-        if self.o.use_emb_as_w:
-            if self.o.use_word_emb and self.o.freeze_word_emb:
-                self.prefetched_word_emb = self.word_encoder.emb(word_idx)
+        self.pos_idx = pos_idx
 
     def reduce_lr_rate(self):
         self.lr *= self.lr_decay

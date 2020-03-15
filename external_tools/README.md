@@ -8,4 +8,4 @@ Paper: Using Universal Linguistic Knowledge to Guide Grammar Indunction
 
 Original Code: http://groups.csail.mit.edu/rbg/code/dependency/
 
-
+Used for lndmv\`s good init. `convert_output.py` is a helper scripts to convert `output` file to conll format.

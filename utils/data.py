@@ -324,6 +324,14 @@ class ConllDataset:
         for id, instance in enumerate(self.instances):
             instance.id = id
 
+    def add(self, ds2):
+        self.path = '<FROM ADD>'
+        self.instances.extend(ds2.instances)
+        for id, instance in enumerate(self.instances):
+            instance.id = id
+            instance.ds = self
+        return self
+
 
 class ConllDatasetWithEmbedding(ConllDataset):
     def __init__(self, path, emb_path, word_vocab=None, pos_vocab=None, min_len=0, max_len=70):
