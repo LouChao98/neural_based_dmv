@@ -7,6 +7,8 @@ from utils.data import ConllDataset, Vocab, BLLIP_POS
 from module.dmv import DMV, DMVOptions
 from module.neural_m import NeuralM, NeuralMOptions
 
+# NO UPDATE ROOT
+
 
 @dataclasses.dataclass
 class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
@@ -18,12 +20,13 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
 
     # dim=dim_word_emb. to build `pre_out_child` matrix when use_emb_as_w=True
     # NOT for converting pos array to vectors
-    pos_emb_path: str = 'data/bllip_vec/posvectors.npy'
+    out_pos_emb_path: str = 'data/bllip_vec/posvectors.npy'  # for out, dim=100
+    pos_emb_path: str = 'data/bllip_vec/posvec.npy'  # real emb, dim=20
 
     dmv_batch_size: int = 15360
     reset_neural: bool = False
     neural_stop_criteria: float = 1e-4
-    neural_max_subepoch: int = 50
+    neural_max_subepoch: int = 100
     neural_init_epoch: int = 1
 
     # pretrained_ds = 'data/wsj10_tr_pred'
@@ -39,17 +42,19 @@ class LNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     dim_word_emb: int = 100
     dim_valence_emb: int = 20
     dim_hidden: int = 128
-    dim_pre_out_decision: int = 32
+    dim_pre_out_decision: int = 16
     dim_pre_out_child: int = 120
     dropout: float = 0.3
-    lr: float = 0.001
+    lr: float = 0.03
+    optimizer: str = 'adam'  # overwrited in LNDMVModel.build
     use_pos_emb: bool = True
     use_word_emb: bool = True
     use_valence_emb: bool = True
     use_emb_as_w: bool = True
     freeze_word_emb: bool = False
+    freeze_pos_emb: bool = False
 
-    batch_size: int = 1024
+    batch_size: int = 512
     max_epoch: int = 100
     early_stop: int = 10
     compare_field: str = 'likelihood'
@@ -85,7 +90,9 @@ class LNDMVModel(Model):
             else:
                 self.converter = get_tag_id_converter(word_idx, len(self.r.train_ds.pos_vocab))
 
-        self.neural_m = NeuralM(self.o, self.r.word_emb, self.r.pos_emb).cuda()
+        self.neural_m = NeuralM(self.o, self.r.word_emb, self.r.out_pos_emb, self.r.pos_emb).cuda()
+        # self.neural_m.optimizer = torch.optim.Adam(self.neural_m.parameters(), lr=self.o.lr, betas=(0.5, 0.75))
+        self.neural_m.optimizer = torch.optim.SGD(self.neural_m.parameters(), lr=self.o.lr, momentum=0.9)
 
         if self.o.use_pair:
             word_idx, pos_idx = [], []
@@ -110,6 +117,9 @@ class LNDMVModel(Model):
             self.r.logger.write("finishing initialization")
         self.dmv.reset_root_counter()
 
+        # EXPERIMENT
+        # self.neural_m.optimizer = torch.optim.SGD(self.neural_m.parameters(), lr=self.o.lr, momentum=0.9)
+
     def train_one_step(self, epoch_id, batch_id, one_batch):
         batch_size = len(one_batch[0])
 
@@ -119,8 +129,7 @@ class LNDMVModel(Model):
         pos_array = cpasarray(one_batch[1])
         word_array = cpasarray(one_batch[2])
         len_array = one_batch[3]
-        with Timer(epoch_id == 0 and batch_id == 0):
-            tag_array = self.converter(word_array, pos_array)
+        tag_array = self.converter(word_array, pos_array)
 
         ll = self.dmv.e_step(id_array, tag_array, len_array)
         self.dmv.batch_dec_trace = cp.sum(self.dmv.batch_dec_trace, axis=2)
@@ -149,7 +158,7 @@ class LNDMVModel(Model):
                 loss.backward()
                 self.neural_m.optimizer.step()
 
-            if loss_previous > 0. and not self.dmv.initializing:
+            if loss_previous > 0.:
                 diff_rate = abs(loss_previous - loss_current) / loss_previous
                 if diff_rate < self.o.neural_stop_criteria:
                     break
@@ -172,7 +181,7 @@ class LNDMVModel(Model):
         return {'loss': loss_current, 'likelihood': ll, 'runs': sub_run + 1}
 
     def train_callback(self, epoch_id, dataset, result):
-        self.dmv.m_step()
+        # self.dmv.m_step()
         return {'loss': sum(result['loss']) / len(result['loss']),
                 'likelihood': sum(result['likelihood']),
                 'runs': sum(result['runs']) / len(result['runs'])}
@@ -305,6 +314,7 @@ class LNDMVModelRunner(Runner):
             self.word_emb = np.load(self.o.emb_path)[:self.o.num_lex + 2]
         else:
             self.word_emb = None
+        self.out_pos_emb = np.load(self.o.out_pos_emb_path) if self.o.out_pos_emb_path else None
         self.pos_emb = np.load(self.o.pos_emb_path) if self.o.pos_emb_path else None
 
 
@@ -317,5 +327,6 @@ if __name__ == '__main__':
     runner = LNDMVModelRunner(options)
     if options.pretrained_ds:
         runner.logger.write('init with acc:')
+        runner.evaluate('dev')
         runner.evaluate('test')
     runner.start()

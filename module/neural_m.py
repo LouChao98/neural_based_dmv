@@ -290,7 +290,7 @@ class NeuralM(nn.Module):
 
         expanded, d, v, mask = self.prepare_decision(to_expand, len_mask, batch_size, max_len)
         h = self.real_forward(expanded[:], d, v, True).view(-1)
-        loss += self.loss(h, decision_trace, mask)  # & decision_mask.view(-1))
+        loss += self.loss(h, decision_trace, mask)
 
         transition_trace = traces['transition']
         transition_trace = transition_trace.view(-1)
@@ -301,7 +301,7 @@ class NeuralM(nn.Module):
             *_, mask = self.prepare_trainsition(to_expand, len_mask, batch_size, max_len, only_mask=True)
         h = self.real_forward(expanded, d, v, False)
         h = self.transition_param_helper(tag_array, h, valid_direction=False).view(-1)
-        loss += self.loss(h, transition_trace, mask)  # & trace_mask.view(-1))
+        loss += self.loss(h, transition_trace, mask)
         return loss
 
     def real_forward(self, emb_buffer, direction, valence, is_decision):
