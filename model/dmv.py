@@ -17,8 +17,8 @@ class DMVModelOptions(DMVOptions, RunnerOptions):
     test_ds: str = 'data/wsj10_te'
 
     batch_size: int = 10000
-    max_epoch: int = 30
-    early_stop: int = 0
+    max_epoch: int = 200
+    early_stop: int = 20
     compare_field: str = 'likelihood'
     save_best: bool = True
     show_log: bool = True
@@ -27,9 +27,14 @@ class DMVModelOptions(DMVOptions, RunnerOptions):
     run_test: bool = True
 
     e_step_mode: str = 'em'
-    cv: int = 1
+    cv: int = 2
     count_smoothing: float = 0.1
     param_smoothing: float = 0.1
+
+    use_softmax_em: bool = True
+    softmax_em_sigma: tuple = (1, 0, 100)
+    softmax_em_sigma_threshold: float = 0.8
+    softmax_em_auto_step: bool = True
 
 
 class DMVModel(Model):
