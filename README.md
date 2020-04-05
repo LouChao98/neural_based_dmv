@@ -4,7 +4,7 @@
 
 Due to the difference in the framework, dataset processing methods and model implementation, we did not use the parameter settings in the paper and results are for reference only.
 
-- [x] N-DMV: [Unsupervised Neural Dependency Parsing](https://www.aclweb.org/anthology/D16-1073/)
+- [x] NDMV: [Unsupervised Neural Dependency Parsing](https://www.aclweb.org/anthology/D16-1073/)
 - [ ] L-NDMV: [Dependency Grammar Induction with Neural Lexicalization and Big Training Data](https://www.aclweb.org/anthology/D17-1176/)
 - [ ] D-NDMV: [Enhancing Unsupervised Generative Dependency Parser with Contextual Information](https://www.aclweb.org/anthology/P19-1526/)
 
@@ -34,3 +34,6 @@ A GPU is required.
 You can find the description of each field of the configuration file in the subclass of Options, which named as `XXXXOptions`.
 
 If get an ModuleNotFoundError for `utils` or `module`, you need set `PYTHONPATH` to include the project`s root.
+
+## L-NDMV
+

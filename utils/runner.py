@@ -127,9 +127,9 @@ class RunnerOptions(Options):
 
     save_checkpoint_freq: int = 0  # save every n epoch, 0=no save
     save_checkpoint_max: int = 5  # max num of checkpoints
-    save_best: bool = False
-    save_log: bool = False
-    show_log: bool = False
+    save_best: bool = True
+    save_log: bool = True
+    show_log: bool = True
     show_best_hit: bool = False
 
     # recovery

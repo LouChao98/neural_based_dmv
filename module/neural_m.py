@@ -218,7 +218,8 @@ class NeuralM(nn.Module):
             o.dim_pre_out_child = w_dim
 
             if out_pos_emb is not None:
-                self.pos_emb_out = nn.Parameter(torch.tensor(out_pos_emb, dtype=torch.float))
+                self.pos_emb_out = nn.Parameter(torch.tensor(
+                    out_pos_emb, dtype=torch.float), requires_grad=o.freeze_pos_emb)
             else:
                 self.pos_emb_out = nn.Parameter(torch.empty(num_pos, o.dim_pre_out_child))
                 nn.init.normal_(self.pos_emb_out.data)
@@ -255,7 +256,7 @@ class NeuralM(nn.Module):
         """
         len_array = arrays['len']
         batch_size = len(len_array)
-        max_len = arrays['pos'].shape[1]
+        max_len = arrays['pos'].shape[1] if 'pos' in arrays else arrays['word'].shape[1]
 
         to_expand = []
         if self.o.use_pos_emb:
@@ -345,7 +346,8 @@ class NeuralM(nn.Module):
 
     @staticmethod
     def loss(forward_out, target_count, mask):
-        batch_loss = -torch.sum(target_count * forward_out * mask) / torch.sum(mask)
+        # mask.to(torch.long) for compatibility (torch <= 1.2)
+        batch_loss = -torch.sum(target_count * forward_out * mask.to(torch.long)) / torch.sum(mask)
         return batch_loss
 
     @staticmethod
@@ -400,16 +402,14 @@ class NeuralM(nn.Module):
             3).expand(-1, -1, -1, 2 * self.cv).reshape(-1)
         return expanded, direction_array, valence_array, mask
 
-    def transition_param_helper(self, group_ids, forward_output, valid_direction=False):
+    def transition_param_helper(self, tag_array, forward_output, valid_direction=False):
         """convert (batch, seq_len, 2, self.cv, num_tag) to (batch, seq_len, seq_len, [direction,] self.cv)"""
-        batch_size, max_len = group_ids.shape
+        batch_size, max_len = tag_array.shape
         forward_output = forward_output.view(batch_size, max_len, 2, self.cv, self.o.num_tag)
-        index = group_ids.view(batch_size, 1, 1, 1,
-                               max_len).expand(-1, max_len, 2, self.cv, -1)
+        index = tag_array.view(batch_size, 1, 1, 1, max_len).expand(-1, max_len, 2, self.cv, -1)
         h = torch.gather(forward_output, 4, index).permute(0, 1, 4, 2, 3).contiguous()
         if valid_direction:
-            index = torch.ones(batch_size, max_len, max_len,
-                               1, self.cv, dtype=torch.long, device='cuda')
+            index = torch.ones(batch_size, max_len, max_len, 1, self.cv, dtype=torch.long, device='cuda')
             for i in range(max_len):
                 index[:, i, :i] = 0
             h = torch.gather(h, 3, index).squeeze(3)

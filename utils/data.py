@@ -181,15 +181,17 @@ class ConllInstance:
 class ConllDataset:
     def __init__(self, path, word_vocab=None, pos_vocab=None, sort=False,
                  min_len=0, max_len=10000):
-        self.path = path
+        self.path = path.strip().split(';')
 
         self.word_vocab = word_vocab
         self.pos_vocab = pos_vocab
         self.sorted = False
 
-        with open(self.path, 'r') as f:
-            self.instances = list(filter(lambda i: min_len <= i.len <= max_len,
-                                         self.read_instance(f)))
+        self.instances = []
+        for p in self.path:
+            with open(p, 'r') as f:
+                self.instances.extend(
+                    list(filter(lambda i: min_len <= i.len <= max_len, self.read_instance(f))))
         if sort:
             self.sort_by_len()
         else:

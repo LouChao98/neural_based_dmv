@@ -31,7 +31,7 @@ class DMVModelOptions(DMVOptions, RunnerOptions):
     count_smoothing: float = 0.1
     param_smoothing: float = 0.1
 
-    use_softmax_em: bool = True
+    use_softmax_em: bool = False
     softmax_em_sigma: tuple = (1, 0, 100)
     softmax_em_sigma_threshold: float = 0.8
     softmax_em_auto_step: bool = True

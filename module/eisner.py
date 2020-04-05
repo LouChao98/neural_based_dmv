@@ -100,7 +100,7 @@ def prepare_backtracking(batch_size, fake_len):
 
 def batch_inside(trans_scores, dec_scores, len_array):
     # trans_scores: batch, head, child, cv
-    # dec_scores: batch, head, direction, dv, decision
+    # dec_scores:   batch, head, direction, dv, decision
 
     batch_size, fake_len, *_ = trans_scores.shape
     span2id, id2span, ijss, ikcs, ikis, kjcs, kjis, basic_span = \

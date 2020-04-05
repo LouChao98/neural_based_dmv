@@ -3,13 +3,12 @@ from typing import Union, Tuple
 from dataclasses import dataclass
 
 import cupyx as cpx
-
+import torch
 from utils.common import *
+from utils.functions import torch2cp, cp2torch
+from torch import nn
 from utils.options import Options
-from module.eisner import constituent_index, batch_inside, batch_outside, batch_parse
-from utils.functions import cp2torch, torch2cp
-
-SOFTMAX_EM_SIGMA_TYPE = Union[float, Tuple[float, float, int]]
+from module.eisner_v2 import batch_inside
 
 
 @dataclass
@@ -20,39 +19,18 @@ class DMVOptions(Options):
     e_step_mode: str = 'em'  # em or viterbi
     count_smoothing: float = 1e-1  # smooth for init_param
     param_smoothing: float = 1e-1  # smooth for m_step
-    use_gpu_param: bool = False
-
-    # ===== extentions =====
-
-    # see `Unambiguity Regularization for Unsupervised Learning of Probabilistic Grammars`
-    use_softmax_em: bool = False
-    # if Tuple[float, float, int], use annealing
-    # Tuple[float, float, int] means start_sigma, end_sigma, duration.
-    softmax_em_sigma: SOFTMAX_EM_SIGMA_TYPE = (1., 0., 100)
-    # if sigma bigger than this threshold, run viterbi to avoid overflow
-    softmax_em_sigma_threshold: float = 0.9
-    # if True, call softmax_em_step automatically when m_step is called.
-    softmax_em_auto_step: bool = True
-
-    # backoff_rate*p(r|child_tag, dir, cv) + (1-backoff_rate)*p(r|parent_tag, child_tag, dir, cv)
-    # FIXME bad code
-    use_child_backoff: bool = False
-    child_backoff_rate: float = 0.33
-
-    # function mask is moved to DMV.set_function_mask
 
 
-class DMV:
+class DMV(nn.Module):
     """Dependency Model with Valence
-
-    See module/eisner.py for inside-outside algorithm.
-    See model/dmv.py for whole training or testing pipeline.
 
     Note: there is randomness when using scatter_add because it uses atomicAdd
     """
 
     def __init__(self, o: DMVOptions):
+        super().__init__()
         self.o = o
+        assert o.e_step_mode in ('em', 'viterbi')
         self.initializing = True  # enable ndmv support if False
 
         # if self.initializing is False, this param will be used
@@ -60,28 +38,19 @@ class DMV:
         self.all_trans_param = None
         self.all_dec_param = None
 
-        # root_param: child_pos
-        # trans_param: head_pos, child_pos, direction, cv
-        # dec_param: head_pos, direction, dv, decision
-        self.root_param = cpfzeros(self.o.num_tag)
-        self.trans_param = cpfzeros((self.o.num_tag, self.o.num_tag, 2, self.o.cv))
-        self.dec_param = cpfzeros((self.o.num_tag, 2, 2, 2))
-
-        self.root_counter = cpfzeros(self.o.num_tag)
-        self.batch_trans_trace = None
-        self.batch_dec_trace = None
-
-        assert not (o.use_softmax_em and o.e_step_mode == 'viterbi'), "softmax em need e_step_mode=em"
-        self.softmax_em_cursor = 0
-        self.softmax_em_current_sigma = 0.
-        self.softmax_em_step()
+        # root_param: child_tag
+        # trans_param: head_tag, child_tag, direction, cv
+        # dec_param: head_tag, direction, dv, decision
+        self.root_param = nn.Parameter(torch.FloatTensor(o.num_tag))
+        self.trans_param = nn.Parameter(torch.FloatTensor(o.num_tag, o.num_tag, 2, o.cv))
+        self.dec_param = nn.Parameter(torch.FloatTensor(o.num_tag, 2, 2, 2))
 
         self.function_mask_set = None  # for UD
 
         self.trans_buffer = None  # pinned memory for faster CPU-GPU transfer
         self.dec_buffer = None
 
-    def parse(self, id_array: np.ndarray, tag_array: cp.ndarray, len_array: np.ndarray):
+    def parse(self, id_array, tag_array, len_array):
         tag_array = self.input_gaurd(tag_array)
         trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
         heads, *_ = batch_parse(trans_scores, dec_scores, len_array)
@@ -90,154 +59,26 @@ class DMV:
         parse_results = {id_array[i]: heads[i] for i in range(id_array.shape[0])}
         return parse_results
 
-    def e_step(self, id_array: np.ndarray, tag_array: cp.ndarray, len_array: np.ndarray):
+    def forward(self, id_array, tag_array, len_array):
         batch_size, real_len = tag_array.shape
-
-        # sentence_transition_trace:  batch, h, m, dir, cv
-        # sentence_decision_trace:    batch, h, m, dir, dv, decision.
-        #   although we have h==m for stop and h!=m for go, we keep
-        #   decision-axis for simplify (as well as direction-axis).
-        self.batch_trans_trace = cpfzeros((batch_size, real_len, real_len, 2, self.o.cv))
-        self.batch_dec_trace = cpfzeros((batch_size, real_len, real_len, 2, 2, 2))
+        mode = 'sum' if self.o.e_step_mode == 'em' else 'max'
 
         tag_array = self.input_gaurd(tag_array)
-
-        if self.o.e_step_mode == 'viterbi' or (
-                self.o.use_softmax_em and self.softmax_em_current_sigma >= self.o.softmax_em_sigma_threshold):
-            return self.run_viterbi_estep(id_array, tag_array, len_array)
-        if self.o.e_step_mode == 'em':
-            return self.run_em_estep(id_array, tag_array, len_array)
-
-        raise NotImplementedError
-
-    def run_em_estep(self, id_array, tag_array, len_array):
-        batch_size, fake_len = tag_array.shape
-
         trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
-        if self.o.use_softmax_em:
-            trans_scores *= 1 / (1 - self.softmax_em_current_sigma)
-            dec_scores *= 1 / (1 - self.softmax_em_current_sigma)
-        if self.function_mask_set is not None:
-            self.function_mask(trans_scores, tag_array)
-
-        if DEBUG:
-            assert not cp.isnan(trans_scores).any()
-            assert not cp.isnan(dec_scores).any()
-
-        ictable, iitable, prob = batch_inside(trans_scores, dec_scores, len_array)
-        octable, oitable = batch_outside(ictable, iitable, trans_scores, dec_scores, len_array)
-
-        if DEBUG:
-            assert not cp.isnan(ictable).any()
-            assert not cp.isnan(iitable).any()
-            assert not cp.isnan(octable).any()
-            assert not cp.isnan(oitable).any()
-
-        span2id, id2span, ijss, ikcs, ikis, kjcs, kjis, basic_span = constituent_index(fake_len)
-        len_array = cpasarray(len_array)
-        prob = cp.expand_dims(prob, 1)
-
-        for h in range(fake_len):
-            for m in range(1, fake_len):
-                len_mask = ((h > len_array) | (m > len_array))
-
-                if h == m:
-                    for direction in range(2):
-                        span_id = span2id[h, h, direction]
-                        count = cp.exp(ictable[:, span_id, :] + octable[:, span_id, :] - prob)
-                        count[len_mask] = 0.
-                        self.batch_dec_trace[:, h - 1, m - 1, direction, :, STOP] = count
-                else:
-                    direction = 0 if h > m else 1
-                    span_id = span2id[m, h, direction] if direction == 0 else span2id[h, m, direction]
-                    count = cp.exp(iitable[:, span_id, :] + oitable[:, span_id, :] - prob)
-                    count[len_mask] = 0.
-
-                    if h == 0:
-                        cpx.scatter_add(self.root_counter, tag_array[:, m], cp.sum(count, axis=1))
-                    else:
-                        self.batch_trans_trace[:, h - 1, m - 1, direction, :] = \
-                            cp.sum(count, axis=1, keepdims=True) if self.o.cv == 1 else count
-                        self.batch_dec_trace[:, h - 1, m - 1, direction, :, GO] = count
-
-        batch_likelihood = cp.sum(prob).get()
-        if self.o.use_softmax_em:
-            batch_likelihood *= (1 - self.softmax_em_current_sigma)
-        return batch_likelihood
-
-    def run_viterbi_estep(self, id_array, tag_array, len_array):
-        batch_size, real_len = tag_array.shape
-
-        trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
-        if self.function_mask_set is not None:
-            self.function_mask(trans_scores, tag_array)
-
-        heads, head_valences, valences = batch_parse(trans_scores, dec_scores, len_array)
-
-        len_array = cpasarray(len_array)
-        batch_arange = cp.arange(batch_size)
-        batch_likelihood = cpfzeros(1)
-
-        for m in range(1, real_len):
-            h = heads[:, m]
-            direction = (h <= m).astype(cpi)
-            h_valence = head_valences[:, m]
-            m_valence = valences[:, m]
-            m_child_valence = h_valence if self.o.cv > 1 else cp.zeros_like(h_valence)
-
-            len_mask = ((h <= len_array) & (m <= len_array))
-            if DEBUG and ((m <= len_array) & (h > len_array)).any():
-                print('find bad arc')
-
-            batch_likelihood += cp.sum(dec_scores[batch_arange, m, 0, m_valence[:, 0], STOP][len_mask])
-            batch_likelihood += cp.sum(dec_scores[batch_arange, m, 1, m_valence[:, 1], STOP][len_mask])
-            self.batch_dec_trace[batch_arange, m - 1, m - 1, 0, m_valence[:, 0], STOP] = len_mask
-            self.batch_dec_trace[batch_arange, m - 1, m - 1, 1, m_valence[:, 1], STOP] = len_mask
-
-            head_mask = h == 0
-            mask = head_mask * len_mask
-            if mask.any():
-                # when use_torch_in_cupy_malloc(), mask.any()=False will raise a NullPointer error
-                batch_likelihood += cp.sum(trans_scores[:, 0, m, 0][mask])
-                cpx.scatter_add(self.root_counter, tag_array[:, m], mask)
-
-            head_mask = ~head_mask
-            mask = head_mask * len_mask
-            if mask.any():
-                batch_likelihood += cp.sum(trans_scores[batch_arange, h, m, m_child_valence][mask])
-                batch_likelihood += cp.sum(dec_scores[batch_arange, h, direction, h_valence, GO][mask])
-                self.batch_trans_trace[batch_arange, h - 1, m - 1, direction, m_child_valence] = mask
-                self.batch_dec_trace[batch_arange, h - 1, m - 1, direction, h_valence, GO] = mask
-
-        return batch_likelihood.get()[0]
-
-    def m_step(self, trans_counter=None, dec_counter=None, update_root=True):
-        if update_root:
-            assert not DEBUG or not cp.isnan(self.root_counter).any()
-            self.root_counter += self.o.param_smoothing
-            root_sum = cp.sum(self.root_counter)
-            cp.log(self.root_counter / root_sum, out=self.root_param)
-
-        if trans_counter is not None:
-            assert not DEBUG or not cp.isnan(trans_counter).any()
-            trans_counter += self.o.param_smoothing
-            if self.o.use_child_backoff:
-                trans_counter = self.apply_child_backoff(trans_counter)
-            child_sum = cp.sum(trans_counter, axis=1, keepdims=True)
-            cp.log(trans_counter / child_sum, out=self.trans_param)
-
-        if dec_counter is not None:
-            assert not DEBUG or not cp.isnan(dec_counter).any()
-            dec_counter += self.o.param_smoothing
-            decision_sum = cp.sum(dec_counter, axis=3, keepdims=True)
-            cp.log(dec_counter / decision_sum, out=self.dec_param)
-
-        if self.o.use_softmax_em and self.o.softmax_em_auto_step:
-            self.softmax_em_step()
+        prob = torch.nn.functional.one_hot(tag_array, self.o.num_tag).to(torch.float)
+        ictable, iitable, prob = batch_inside(trans_scores, dec_scores, prob, len_array, mode)
+        return prob
 
     def init_param(self, dataset, getter=None):
         # require same_len
         harmonic_sum = [0., 1.]
+
+        dec_param = torch2cp(self.dec_param.data)
+        root_param = torch2cp(self.root_param.data)
+        trans_param = torch2cp(self.trans_param.data)
+        dec_param.fill(0.)
+        root_param.fill(0.)
+        trans_param.fill(0.)
 
         def get_harmonic_sum(n):
             nonlocal harmonic_sum
@@ -254,15 +95,15 @@ class DMV:
                         # + and - are just for distinguish, see self.first_child_update
                         cpx.scatter_add(norm_counter, (pos, direction, NOCHILD, GO), 1)
                         cpx.scatter_add(norm_counter, (pos, direction, HASCHILD, GO), -1)
-                        cpx.scatter_add(self.dec_param, (pos, direction, HASCHILD, GO), change[i, direction])
+                        cpx.scatter_add(dec_param, (pos, direction, HASCHILD, GO), change[i, direction])
                         cpx.scatter_add(norm_counter, (pos, direction, NOCHILD, STOP), -1)
                         cpx.scatter_add(norm_counter, (pos, direction, HASCHILD, STOP), 1)
-                        cpx.scatter_add(self.dec_param, (pos, direction, NOCHILD, STOP), 1)
+                        cpx.scatter_add(dec_param, (pos, direction, NOCHILD, STOP), 1)
                     else:
-                        cpx.scatter_add(self.dec_param, (pos, direction, NOCHILD, STOP), 1)
+                        cpx.scatter_add(dec_param, (pos, direction, NOCHILD, STOP), 1)
 
         def first_child_update(norm_counter):
-            all_param = self.dec_param.flatten()
+            all_param = dec_param.flatten()
             all_norm = norm_counter.flatten()
             mask = (all_param <= 0) | (0 <= all_norm)
             ratio = - all_param / all_norm
@@ -281,7 +122,7 @@ class DMV:
 
             batch_size, word_num = pos_array.shape
             change.fill(0.)
-            cpx.scatter_add(self.root_param, pos_array.flatten(), 1. / word_num)
+            cpx.scatter_add(root_param, pos_array.flatten(), 1. / word_num)
             if word_num > 1:
                 for child_i in range(word_num):
                     child_sum = get_harmonic_sum(child_i - 0) + get_harmonic_sum(word_num - child_i - 1)
@@ -293,29 +134,29 @@ class DMV:
                         head_pos = pos_array[:, head_i]
                         child_pos = pos_array[:, child_i]
                         diff = scale / abs(head_i - child_i)
-                        cpx.scatter_add(self.trans_param, (head_pos, child_pos, direction), diff)
+                        cpx.scatter_add(trans_param, (head_pos, child_pos, direction), diff)
                         change[head_i, direction] += diff
             update_decision(change, norm_counter, pos_array)
 
-        self.trans_param += self.o.count_smoothing
-        self.dec_param += self.o.count_smoothing
-        self.root_param += self.o.count_smoothing
+        trans_param += self.o.count_smoothing
+        dec_param += self.o.count_smoothing
+        root_param += self.o.count_smoothing
 
         es = first_child_update(norm_counter)
         norm_counter *= 0.9 * es
-        self.dec_param += norm_counter
+        dec_param += norm_counter
 
-        root_param_sum = cp.sum(self.root_param)
-        trans_param_sum = cp.sum(self.trans_param, axis=1, keepdims=True)
-        decision_param_sum = cp.sum(self.dec_param, axis=3, keepdims=True)
+        root_param_sum = cp.sum(root_param)
+        trans_param_sum = cp.sum(trans_param, axis=1, keepdims=True)
+        decision_param_sum = cp.sum(dec_param, axis=3, keepdims=True)
 
-        self.root_param /= root_param_sum
-        self.trans_param /= trans_param_sum
-        self.dec_param /= decision_param_sum
+        root_param /= root_param_sum
+        trans_param /= trans_param_sum
+        dec_param /= decision_param_sum
 
-        cp.log(self.trans_param, out=self.trans_param)
-        cp.log(self.root_param, out=self.root_param)
-        cp.log(self.dec_param, out=self.dec_param)
+        cp.log(trans_param, out=trans_param)
+        cp.log(root_param, out=root_param)
+        cp.log(dec_param, out=dec_param)
 
     def init_pretrained(self, dataset, getter=None):
         if getter is None:
@@ -407,34 +248,6 @@ class DMV:
         d, t = self.get_batch_counter_by_tag(tag_array, mode=1)
         self.m_step(t[0], d[0])
 
-    def apply_child_backoff(self, transition_counter):
-        """backoffs      [1, child_pos, directoin, cv]"""
-        backoffs = cp.sum(transition_counter, axis=0, keepdims=True)
-        backoff_norms = cp.sum(backoffs, axis=1, keepdims=True)
-
-        equal_prob = 1. / self.o.num_tag
-
-        bad_mask = backoff_norms <= 1e-6
-        backoffs[cp.tile(bad_mask, (1, self.o.num_tag, 1, 1))] = equal_prob
-        backoff_norms[bad_mask] = 1.
-        backoffs /= backoff_norms
-
-        transition_counter_norms = cp.sum(transition_counter, axis=1, keepdims=True)
-        transition_counter /= transition_counter_norms
-        transition_counter[cp.isnan(transition_counter)] = equal_prob
-
-        return (1 - self.o.child_backoff_rate) * transition_counter + self.o.child_backoff_rate * backoffs
-
-    def softmax_em_step(self):
-        if isinstance(self.o.softmax_em_sigma, float):
-            self.softmax_em_current_sigma = self.o.softmax_em_sigma
-        else:
-            start, end, duration = self.o.softmax_em_sigma
-            speed = (end - start) / duration
-            self.softmax_em_current_sigma = max(
-                end, start + speed * self.softmax_em_cursor)
-            self.softmax_em_cursor += 1
-
     def set_function_mask(self, functions_to_mask):
         self.function_mask_set = cpasarray(functions_to_mask)
 
@@ -495,27 +308,24 @@ class DMV:
 
     def evaluate_batch_score(self, tag_array):
         """param[tag_num, ...] to param[batch, sentence_len, ...]"""
-        # scores:           batch, head, child, cv
-        # decision_scores:  batch, position, direction, dv, decision
-        batch_size, sentence_len = tag_array.shape
+        # trans_scores:     batch, head, ntag, child, ntag, cv
+        # dec_scores:       batch, head, ntag, direction, dv, decision
+        batch_size, fake_len = tag_array.shape
+        ntag, cv = self.o.num_tag, self.o.cv
 
-        trans_param = cp.expand_dims(self.trans_param, 0)
-        head_pos_index = tag_array.reshape(*tag_array.shape, 1, 1, 1)
-        child_pos_index = tag_array.reshape(batch_size, 1, sentence_len, 1, 1)
-        scores = cp.take_along_axis(cp.take_along_axis(trans_param, head_pos_index, 1), child_pos_index, 2)
-        index = (1 - cp.tri(sentence_len, k=-1, dtype=cpi)).reshape(1, sentence_len, sentence_len, 1, 1)
-        scores = cp.take_along_axis(scores, index, 3).squeeze(3)
+        trans_scores = self.trans_param.view(1, ntag, 1, ntag, 2, cv).repeat(fake_len, 1, fake_len, 1, 1, 1)
+        d_indexer = (1 - np.tri(fake_len, k=-1, dtype=int)).reshape(fake_len, 1, fake_len, 1, 1, 1)
+        d_indexer = torch.tensor(d_indexer, device='cuda').expand(-1, ntag, -1, ntag, -1, cv)
+        trans_scores = trans_scores.gather(4, d_indexer).squeeze(4)
 
-        decision_param = cp.expand_dims(self.dec_param, 0)
-        head_pos_index = tag_array.reshape(*tag_array.shape, 1, 1, 1)
-        decision_scores = cp.take_along_axis(decision_param, head_pos_index, 1)
-        decision_scores[:, 0] = 0
+        trans_scores[0] = self.root_param.view(1, -1, 1)
+        trans_scores[:, :, 0] = -1e30
+        trans_scores = trans_scores.unsqueeze(0).expand(batch_size, *trans_scores.shape)
 
-        root_param = cp.expand_dims(self.root_param, 0)
-        root_scores = cp.expand_dims(cp.take_along_axis(root_param, tag_array, 1), -1)
-        scores[:, 0, :, :] = root_scores
-        scores[:, :, 0, :] = -cp.inf
-        return scores, decision_scores
+        dec_scores = self.dec_param.view(1, 1, *self.dec_param.shape)\
+            .expand(batch_size, fake_len, *self.dec_param.shape)
+
+        return trans_scores, dec_scores
 
     def collect_scores(self, idx_array, tag_array, len_array):
         batch_size = idx_array.shape[0]
@@ -586,19 +396,14 @@ class DMV:
                 self.all_dec_param.append(npfzeros((length, 2, 2, 2)))
 
     def save(self, path):
-        os.makedirs(path, exist_ok=True)
-        np.save(os.path.join(path, 'transition_param.npy'), cp.asnumpy(self.trans_param))
-        np.save(os.path.join(path, 'root_param.npy'), cp.asnumpy(self.root_param))
-        np.save(os.path.join(path, 'decision_param.npy'), cp.asnumpy(self.dec_param))
+        torch.save(self.state_dict(), os.path.join(path, 'dmv'))
 
     def load(self, path):
-        self.trans_param[:] = cpasarray(np.load(os.path.join(path, 'transition_param.npy')))
-        self.root_param[:] = cpasarray(np.load(os.path.join(path, 'root_param.npy')))
-        self.dec_param[:] = cpasarray(np.load(os.path.join(path, 'decision_param.npy')))
+        self.load_state_dict(torch.load(os.path.join(path, 'dmv')))
 
     @staticmethod
     def input_gaurd(tag_array):
         """ add ROOT node at position 0 """
         batch_size = tag_array.shape[0]
-        tag_array = cp.concatenate([cpizeros((batch_size, 1)), tag_array], axis=1)
+        tag_array = torch.cat([torch.zeros(batch_size, 1, dtype=torch.long, device='cuda'), tag_array], axis=1)
         return tag_array
