@@ -16,7 +16,7 @@ class DMVModelOptions(DMVOptions, RunnerOptions):
     dev_ds: str = 'data/wsj10_d'
     test_ds: str = 'data/wsj10_te'
 
-    batch_size: int = 10000
+    batch_size: int = 100
     max_epoch: int = 200
     early_stop: int = 20
     compare_field: str = 'likelihood'
@@ -26,7 +26,7 @@ class DMVModelOptions(DMVOptions, RunnerOptions):
     run_dev: bool = True
     run_test: bool = True
 
-    e_step_mode: str = 'em'
+    e_step_mode: str = 'viterbi'
     cv: int = 2
     count_smoothing: float = 0.1
     param_smoothing: float = 0.1

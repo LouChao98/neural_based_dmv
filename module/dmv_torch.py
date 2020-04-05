@@ -5,10 +5,10 @@ from dataclasses import dataclass
 import cupyx as cpx
 import torch
 from utils.common import *
-from utils.functions import torch2cp, cp2torch
+from utils.functions import torch2cp, cp2torch, logaddexp
 from torch import nn
 from utils.options import Options
-from module.eisner_v2 import batch_inside
+from module.eisner_torch import batch_inside, batch_inside_prob
 
 
 @dataclass
@@ -17,57 +17,132 @@ class DMVOptions(Options):
     max_len: int = 10  # max len for all dataset
     cv: int = 1  # 1 or 2
     e_step_mode: str = 'em'  # em or viterbi
-    count_smoothing: float = 1e-1  # smooth for init_param
-    param_smoothing: float = 1e-1  # smooth for m_step
+    count_smoothing: float = 1e-2  # smooth for init_param
+    param_smoothing: float = 1e-2  # smooth for m_step
+    initializing: bool = True
+
+    lr: float = 0.001
 
 
 class DMV(nn.Module):
-    """Dependency Model with Valence
-
-    Note: there is randomness when using scatter_add because it uses atomicAdd
-    """
 
     def __init__(self, o: DMVOptions):
         super().__init__()
         self.o = o
         assert o.e_step_mode in ('em', 'viterbi')
-        self.initializing = True  # enable ndmv support if False
 
-        # if self.initializing is False, this param will be used
-        # instead of self.trans_param and self.dec_param.
-        self.all_trans_param = None
-        self.all_dec_param = None
-
-        # root_param: child_tag
-        # trans_param: head_tag, child_tag, direction, cv
-        # dec_param: head_tag, direction, dv, decision
-        self.root_param = nn.Parameter(torch.FloatTensor(o.num_tag))
-        self.trans_param = nn.Parameter(torch.FloatTensor(o.num_tag, o.num_tag, 2, o.cv))
-        self.dec_param = nn.Parameter(torch.FloatTensor(o.num_tag, 2, 2, 2))
-
+        self._initializing = None
+        self.set_initializing(o.initializing)  # enable ndmv support if False
         self.function_mask_set = None  # for UD
 
-        self.trans_buffer = None  # pinned memory for faster CPU-GPU transfer
-        self.dec_buffer = None
+    # noinspection PyAttributeOutsideInit
+    def set_initializing(self, value):
+        self._initializing = value
+        if value:
+            # root_param: child_tag
+            # trans_param: head_tag, child_tag, direction, cv
+            # dec_param: head_tag, direction, dv, decision
+            n, c = self.o.num_tag, self.o.cv
+            self.root_param = nn.Parameter(torch.empty(n), requires_grad=True)  # needed in parse()
+            self.trans_param = nn.Parameter(torch.empty(n, n, 2, c), requires_grad=True)
+            self.dec_param = nn.Parameter(torch.empty(n, 2, 2, 2), requires_grad=True)
 
-    def parse(self, id_array, tag_array, len_array):
-        tag_array = self.input_gaurd(tag_array)
-        trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
-        heads, *_ = batch_parse(trans_scores, dec_scores, len_array)
+            # self.optimizer = torch.optim.SGD([self.root_param, self.trans_param, self.dec_param],
+            #     lr=0.1, momentum=0.)
+            self.optimizer = torch.optim.Adam([self.root_param, self.trans_param, self.dec_param],
+                lr=self.o.lr)
+        else:
+            del self.root_param
+            del self.trans_param
+            del self.dec_param
+            del self.optimizer
 
-        heads = heads.get()
-        parse_results = {id_array[i]: heads[i] for i in range(id_array.shape[0])}
-        return parse_results
-
-    def forward(self, id_array, tag_array, len_array):
-        batch_size, real_len = tag_array.shape
+    def forward(self, trans_scores, dec_scores, len_array):
+        """
+        :param trans_scores: Shape[batch, head, child, cv]
+        :param dec_scores: Shape[batch, position, direction, dv, decision]
+        :param len_array: Shape[batch]
+        :return: likelihood for each instance
+        """
         mode = 'sum' if self.o.e_step_mode == 'em' else 'max'
-
-        tag_array = self.input_gaurd(tag_array)
-        trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
-        prob = torch.nn.functional.one_hot(tag_array, self.o.num_tag).to(torch.float)
-        ictable, iitable, prob = batch_inside(trans_scores, dec_scores, prob, len_array, mode)
+        *_, prob = batch_inside(trans_scores, dec_scores, len_array, mode)
         return prob
+
+    def parse(self, trans_scores, dec_scores, len_array):
+
+        self.zero_grad()
+        trans_scores.retain_grad()
+
+        ictable, iitable, prob = batch_inside(trans_scores, dec_scores, len_array, 'max')
+        ll = torch.sum(prob)
+        ll.backward()
+
+        result = trans_scores.grad.nonzero()
+        result = torch.split(result[:, 1:], torch.unique(result[:, 0], return_counts=True)[1].tolist())
+        result2 = []
+        for i, r in enumerate(result):
+            r = r[torch.sort(r[:, 1])[1]][:, 0].tolist()
+            assert len(r) == len_array[i]
+            result2.append(r)
+
+        return result2, ll.item()
+
+    def update_param_use_count(self, mode='tdr'):
+        data = [(self.trans_param, 1, 't'), (self.dec_param, 3, 'd'),
+                (self.root_param, 0, 'r')]
+        data = list(filter(lambda x: x[2] in mode, data))
+
+        with torch.no_grad():
+            for d, i, _ in data:
+                d.data = torch.log(-d.grad + self.o.param_smoothing)
+
+    def prepare_scores(self, tag_array):
+        """param[tag_num, ...] to param[batch, sentence_len, ...]"""
+        # trans_scores:     batch, head, child, cv
+        # dec_scores:       batch, head, direction, dv, decision
+
+        trans_param = self.trans_param
+        dec_param = self.dec_param
+        root_param = self.root_param
+
+        n, c = self.o.num_tag, self.o.cv
+        batch_size, fake_len = tag_array.shape
+
+        trans_param = trans_param.unsqueeze(0).expand(batch_size, n, n, 2, c)
+        head_pos_index = tag_array.view(*tag_array.shape, 1, 1, 1).expand(batch_size, fake_len, n, 2, c)
+        child_pos_index = tag_array.view(batch_size, 1, fake_len, 1, 1).expand(batch_size, fake_len, fake_len, 2, c)
+        trans_scores = torch.gather(torch.gather(trans_param, 1, head_pos_index), 2, child_pos_index)
+        index = cp2torch(1 - cp.tri(fake_len, k=-1, dtype=cpi)) \
+            .view(1, fake_len, fake_len, 1, 1).expand(batch_size, fake_len, fake_len, 1, c)
+        trans_scores = torch.gather(trans_scores, 3, index).squeeze(3)
+
+        decision_param = dec_param.unsqueeze(0).expand(batch_size, n, 2, 2, 2)
+        head_pos_index = tag_array.view(*tag_array.shape, 1, 1, 1).expand(batch_size, fake_len, 2, 2, 2)
+        dec_scores = torch.gather(decision_param, 1, head_pos_index)
+        dec_scores[:, 0] = 0
+
+        root_param = root_param.unsqueeze(0).expand(batch_size, n)
+        root_scores = torch.gather(root_param, 1, tag_array).unsqueeze(-1)
+        trans_scores[:, 0, :, :] = root_scores
+        trans_scores[:, :, 0, :] = -np.inf
+
+        return trans_scores, dec_scores
+
+    def normalize_param(self, mode='tdr'):
+
+        if not self._initializing:
+            print('nothing to normalize')
+            return
+
+        data = [(self.trans_param, 1, 't'), (self.dec_param, 3, 'd'),
+                (self.root_param, 0, 'r')]
+        data = list(filter(lambda x: x[2] in mode, data))
+
+        with torch.no_grad():
+            for d, i, _ in data:
+                # logaddexp(d, self.o.param_smoothing, d.data)
+                s = torch.logsumexp(d, dim=i, keepdim=True)
+                d.data = d - s
 
     def init_param(self, dataset, getter=None):
         # require same_len
@@ -293,108 +368,6 @@ class DMV(nn.Module):
         cpx.scatter_add(trans_out, index, self.batch_trans_trace.reshape(-1, *trans_post_dim))
         return dec_out, trans_out
 
-    def get_scores(self, id_array, tag_array, len_array):
-        """ build scores matrices for dmv.
-
-        Masks:
-          1. NO mask for length
-          2. mask NON-ROOT to ROOT transition scores.
-          3. we set ROOT`s decision scores to log(1).
-        """
-        if self.initializing:
-            return self.evaluate_batch_score(tag_array)
-        else:
-            return self.collect_scores(id_array, tag_array, len_array)
-
-    def evaluate_batch_score(self, tag_array):
-        """param[tag_num, ...] to param[batch, sentence_len, ...]"""
-        # trans_scores:     batch, head, ntag, child, ntag, cv
-        # dec_scores:       batch, head, ntag, direction, dv, decision
-        batch_size, fake_len = tag_array.shape
-        ntag, cv = self.o.num_tag, self.o.cv
-
-        trans_scores = self.trans_param.view(1, ntag, 1, ntag, 2, cv).repeat(fake_len, 1, fake_len, 1, 1, 1)
-        d_indexer = (1 - np.tri(fake_len, k=-1, dtype=int)).reshape(fake_len, 1, fake_len, 1, 1, 1)
-        d_indexer = torch.tensor(d_indexer, device='cuda').expand(-1, ntag, -1, ntag, -1, cv)
-        trans_scores = trans_scores.gather(4, d_indexer).squeeze(4)
-
-        trans_scores[0] = self.root_param.view(1, -1, 1)
-        trans_scores[:, :, 0] = -1e30
-        trans_scores = trans_scores.unsqueeze(0).expand(batch_size, *trans_scores.shape)
-
-        dec_scores = self.dec_param.view(1, 1, *self.dec_param.shape)\
-            .expand(batch_size, fake_len, *self.dec_param.shape)
-
-        return trans_scores, dec_scores
-
-    def collect_scores(self, idx_array, tag_array, len_array):
-        batch_size = idx_array.shape[0]
-        max_len = np.max(len_array)
-
-        if self.o.use_gpu_param:
-            trans_scores = self.all_trans_param[idx_array]
-            dec_scores = self.all_dec_param[idx_array]
-        else:
-            if self.trans_buffer is None:
-                self.dec_buffer = cp.cuda.alloc_pinned_memory(
-                    batch_size * (self.o.max_len + 1) * 8 * (np.dtype(npf).itemsize))
-                self.trans_buffer = cp.cuda.alloc_pinned_memory(
-                    batch_size * (self.o.max_len + 1) * (self.o.max_len + 1) * self.o.cv * (np.dtype(npf).itemsize))
-            trans_scores = np.frombuffer(self.trans_buffer, npf, batch_size * (max_len + 1) * (max_len + 1) * self.o.cv)\
-                .reshape(batch_size, (max_len + 1), (max_len + 1), self.o.cv)
-            dec_scores = np.frombuffer(self.dec_buffer, npf, batch_size * (max_len + 1) * 8) \
-                .reshape(batch_size, (max_len + 1), 2, 2, 2)
-
-            if DEBUG:
-                trans_scores.fill(10000.)
-                dec_scores.fill(10000.)  # check mask leak
-
-            for i, idx in enumerate(idx_array):
-                trans_scores[i, 1:len_array[i] + 1, 1:len_array[i] + 1] = self.all_trans_param[idx]
-                dec_scores[i, 1:len_array[i] + 1] = self.all_dec_param[idx]
-
-        trans_scores = cpasarray(trans_scores)
-        root_param = cp.expand_dims(self.root_param, 0)
-        root_scores = cp.expand_dims(cp.take_along_axis(root_param, tag_array, 1), -1)
-        trans_scores[:, 0, :, :] = root_scores
-        trans_scores[:, :, 0, :] = -cp.inf
-
-        dec_scores = cpasarray(dec_scores)
-        dec_scores[:, 0] = 0
-
-        return trans_scores, dec_scores
-
-    def put_decision_param(self, id_array, param, len_array):
-        if self.o.use_gpu_param:
-            self.all_dec_param[id_array, 1:] = param
-        else:
-            for i, idx in enumerate(id_array):
-                self.all_dec_param[idx][:] = param[i, :len_array[i]]
-                assert not DEBUG or not np.isnan(self.all_dec_param[idx]).any()
-
-    def put_transition_param(self, id_array, param, len_array):
-        if self.o.use_gpu_param:
-            self.all_trans_param[id_array, 1:, 1:] = param
-        else:
-            for i, idx in enumerate(id_array):
-                self.all_trans_param[idx][:] = param[i, :len_array[i], :len_array[i]]
-                assert not DEBUG or not np.isnan(self.all_trans_param[idx]).any()
-
-    def reset_root_counter(self):
-        self.root_counter.fill(0.)
-
-    def init_specific(self, len_array):
-        if self.o.use_gpu_param:
-            num = len(len_array)
-            self.all_trans_param = cpfzeros((num, self.o.max_len + 1, self.o.max_len + 1, self.o.cv))
-            self.all_dec_param = cpfzeros((num, self.o.max_len + 1, 2, 2, 2))
-        else:
-            self.all_dec_param = []
-            self.all_trans_param = []
-            for length in len_array:
-                self.all_trans_param.append(npfzeros((length, length, self.o.cv)))
-                self.all_dec_param.append(npfzeros((length, 2, 2, 2)))
-
     def save(self, path):
         torch.save(self.state_dict(), os.path.join(path, 'dmv'))
 
@@ -402,8 +375,82 @@ class DMV(nn.Module):
         self.load_state_dict(torch.load(os.path.join(path, 'dmv')))
 
     @staticmethod
-    def input_gaurd(tag_array):
+    def input_guard(tag_array):
         """ add ROOT node at position 0 """
         batch_size = tag_array.shape[0]
-        tag_array = torch.cat([torch.zeros(batch_size, 1, dtype=torch.long, device='cuda'), tag_array], axis=1)
+        tag_array = torch.cat([torch.zeros(batch_size, 1, dtype=torch.long, device='cuda'), tag_array], dim=1)
         return tag_array
+
+    @staticmethod
+    def prepare_tag_array(tag_array):
+        batch_size, _ = tag_array.shape
+        tag_array = torch.cat([torch.zeros(batch_size, 1, dtype=torch.long, device='cuda'), tag_array], dim=1)
+        return tag_array
+
+
+class DMVProb(DMV):
+
+    def forward(self, trans_scores, dec_scores, tag_prob, len_array):
+        """
+        :param trans_scores: Shape[batch, head, ntag, child, cv], child should be weighted avg of each tag
+        :param dec_scores: Shape[batch, position, ntag, direction, dv, decision]
+        :param tag_prob: Shape[batch, position]
+        :param len_array: Shape[batch]
+        :return: likelihood for each instance
+        """
+        mode = 'sum' if self.o.e_step_mode == 'em' else 'max'
+
+        # prob = torch.nn.functional.one_hot(tag_array, self.o.num_tag).to(torch.float)
+
+        *_, prob = batch_inside_prob(trans_scores, dec_scores, tag_prob, len_array, mode)
+        return prob
+
+    def parse(self, trans_scores, dec_scores, tag_prob, len_array):
+        self.zero_grad()
+        trans_scores.retain_grad()
+
+        *_, prob = batch_inside_prob(trans_scores, dec_scores, tag_prob, len_array, 'max')
+        ll = torch.sum(prob)
+        ll.backward()
+
+        result = trans_scores.grad.nonzero()
+        result = torch.split(result[:, 1:], torch.unique(result[:, 0], return_counts=True)[1].tolist())
+        result2 = []
+        for i, r in enumerate(result):
+            r = r[torch.sort(r[:, 1])[1]][:, 0].tolist()
+            assert len(r) == len_array[i]
+            result2.append(r)
+
+        return result2, ll.item()
+
+    def prepare_scores(self, tag_prob):
+        """param[tag_num, ...] to param[batch, sentence_len, ...]"""
+        # trans_scores:     batch, head, ntag, child, cv
+        # dec_scores:       batch, head, ntag, direction, dv, decision
+        n, c = self.o.num_tag, self.o.cv
+        batch_size, fake_len, _ = tag_prob.shape
+
+        trans_scores = self.trans_param.view(1, 1, n, 1, n, 2, c) \
+            .expand(batch_size, fake_len, n, fake_len, n, 2, c)
+        tag_prob = tag_prob.view(batch_size, 1, 1, fake_len, n, 1, 1)
+        trans_scores = torch.logsumexp(trans_scores + torch.log(tag_prob), dim=4)
+
+        d_indexer = (1 - np.tri(fake_len, k=-1, dtype=int)).reshape(1, fake_len, 1, fake_len, 1, 1)
+        d_indexer = torch.tensor(d_indexer, device='cuda') \
+            .expand(batch_size, fake_len, n, fake_len, 1, c)
+        trans_scores = trans_scores.gather(4, d_indexer).squeeze(4)
+
+        trans_scores[:, 0] = self.root_param.view(1, n, 1, 1)
+        trans_scores[:, :, :, 0] = -1e30
+
+        dec_scores = self.dec_param.view(1, 1, *self.dec_param.shape) \
+            .expand(batch_size, fake_len, *self.dec_param.shape)
+
+        return trans_scores, dec_scores
+
+    def prepare_tag_array(self, tag_array, tag_prob):
+        batch_size, _ = tag_array.shape
+        tag_array = torch.cat([torch.zeros(batch_size, 1, dtype=torch.long, device='cuda'), tag_array], dim=1)
+        tag_prob = torch.cat([torch.zeros(batch_size, 1, self.o.num_tag, device='cuda'), tag_prob], dim=1)
+        tag_prob[:, 0, 0] = 1.
+        return tag_array, tag_prob

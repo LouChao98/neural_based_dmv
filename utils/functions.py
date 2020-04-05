@@ -57,6 +57,7 @@ def get_init_param_converter_v2(converter, *args, **kwargs):
         pos_array = cp.asarray(arrays[1])
         word_array = cp.asarray(arrays[2])
         return _converter(word_array, pos_array)
+
     return converter
 
 
@@ -68,6 +69,7 @@ def get_init_param_converter(word_idx, num_pos):
         word_array = cp.asarray(arrays[2])
         pos_array = cp.asarray(arrays[1])
         return _converter(word_array, pos_array)
+
     return converter
 
 
@@ -111,6 +113,7 @@ def safe_logaddexp(a, b):
     r[cp.isnan(r)] = -cp.inf
     return r
 
+
 # obj op
 
 
@@ -139,11 +142,13 @@ def use_mempool_in_cupy_malloc():
     cp.cuda.set_allocator(cp.get_default_memory_pool().malloc)
 
 
-def calculate_uas(predicted, gold):
+def calculate_uas(predicted, gold, no_pre=False):
     correct_counter = 0
     total_counter = 0
     for j in gold:
-        ps = predicted[j.id][1:j.len + 1]
+        ps = predicted[j.id]
+        if not no_pre:
+            ps = ps[1:j.len + 1]
         gs = j.entries
         for i, e in enumerate(gs):
             if ps[i] == e.parent_id:
@@ -165,10 +170,10 @@ def print_to_file(predicted, gold, outfile):
                 f.write(f'{g.norm}  ')
             f.write('\n')
             for g, l in zip(gs, word_len):
-                f.write(f'{g.parent_id:<{l+2}d}')
+                f.write(f'{g.parent_id:<{l + 2}d}')
             f.write('\n')
             for h, l in zip(ps, word_len):
-                f.write(f'{h:<{l+2}d}')
+                f.write(f'{h:<{l + 2}d}')
             f.write('\n')
 
 
@@ -189,6 +194,11 @@ def kl_between_gaussian(mean1, cov1, mean2, cov2):
     kl = 0.5 * (torch.log(cov2) - torch.log(cov1) - 1 + cov1 * cov2_inv
                 + torch.pow(mean_diff, 2) * cov2_inv)
     return kl
+
+
+def logaddexp(a, b, out=None):
+    b_exp = torch.exp if type(b) is torch.Tensor else np.exp
+    return torch.log(torch.exp(a) + b_exp(b), out=out)
 
 
 class Timer:

@@ -101,19 +101,36 @@ class DMV:
         self.batch_dec_trace = cpfzeros((batch_size, real_len, real_len, 2, 2, 2))
 
         tag_array = self.input_gaurd(tag_array)
+        trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
 
         if self.o.e_step_mode == 'viterbi' or (
                 self.o.use_softmax_em and self.softmax_em_current_sigma >= self.o.softmax_em_sigma_threshold):
-            return self.run_viterbi_estep(id_array, tag_array, len_array)
+            return self.run_viterbi_estep(tag_array, len_array, trans_scores, dec_scores)
         if self.o.e_step_mode == 'em':
-            return self.run_em_estep(id_array, tag_array, len_array)
+            return self.run_em_estep(tag_array, len_array, trans_scores, dec_scores)
 
         raise NotImplementedError
 
-    def run_em_estep(self, id_array, tag_array, len_array):
+    def e_step_using_unmnanaged_score(self, tag_array: cp.ndarray, len_array: np.ndarray,
+            trans_scores: cp.ndarray, dec_scores: cp.ndarray):
+
+        batch_size, real_len = tag_array.shape
+        self.batch_trans_trace = cpfzeros((batch_size, real_len, real_len, 2, self.o.cv))
+        self.batch_dec_trace = cpfzeros((batch_size, real_len, real_len, 2, 2, 2))
+
+        tag_array = self.input_gaurd(tag_array)
+
+        if self.o.e_step_mode == 'viterbi' or (
+                self.o.use_softmax_em and self.softmax_em_current_sigma >= self.o.softmax_em_sigma_threshold):
+            return self.run_viterbi_estep(tag_array, len_array, trans_scores, dec_scores)
+        if self.o.e_step_mode == 'em':
+            return self.run_em_estep(tag_array, len_array, trans_scores, dec_scores)
+
+        raise NotImplemented
+
+    def run_em_estep(self, tag_array, len_array, trans_scores, dec_scores):
         batch_size, fake_len = tag_array.shape
 
-        trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
         if self.o.use_softmax_em:
             trans_scores *= 1 / (1 - self.softmax_em_current_sigma)
             dec_scores *= 1 / (1 - self.softmax_em_current_sigma)
@@ -165,10 +182,9 @@ class DMV:
             batch_likelihood *= (1 - self.softmax_em_current_sigma)
         return batch_likelihood
 
-    def run_viterbi_estep(self, id_array, tag_array, len_array):
+    def run_viterbi_estep(self, tag_array, len_array, trans_scores, dec_scores):
         batch_size, real_len = tag_array.shape
 
-        trans_scores, dec_scores = self.get_scores(id_array, tag_array, len_array)
         if self.function_mask_set is not None:
             self.function_mask(trans_scores, tag_array)
 
@@ -530,7 +546,8 @@ class DMV:
                     batch_size * (self.o.max_len + 1) * 8 * (np.dtype(npf).itemsize))
                 self.trans_buffer = cp.cuda.alloc_pinned_memory(
                     batch_size * (self.o.max_len + 1) * (self.o.max_len + 1) * self.o.cv * (np.dtype(npf).itemsize))
-            trans_scores = np.frombuffer(self.trans_buffer, npf, batch_size * (max_len + 1) * (max_len + 1) * self.o.cv)\
+            trans_scores = np.frombuffer(self.trans_buffer, npf,
+                batch_size * (max_len + 1) * (max_len + 1) * self.o.cv) \
                 .reshape(batch_size, (max_len + 1), (max_len + 1), self.o.cv)
             dec_scores = np.frombuffer(self.dec_buffer, npf, batch_size * (max_len + 1) * 8) \
                 .reshape(batch_size, (max_len + 1), 2, 2, 2)

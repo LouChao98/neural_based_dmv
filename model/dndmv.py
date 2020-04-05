@@ -69,7 +69,7 @@ class DNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
 
 
 class DNDMVModel(Model):
-    def __init__(self, o: DNMDVModelOptions, r: Runner):
+    def __init__(self, o: DNMDVModelOptions, r: 'DNDMVModelRunner'):
         self.o = o
         self.r = r
 
@@ -226,7 +226,7 @@ class DNDMVModel(Model):
 
 
 class DNDMVModelRunner(Runner):
-    def __init__(self, o):
+    def __init__(self, o: DNMDVModelOptions):
         if o.use_softmax_em:
             from utils import common
             common.cpf = cp.float64
