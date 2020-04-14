@@ -288,7 +288,7 @@ class ConllDataset:
                 instances.sort(key=lambda i: i.len)
             else:
                 instances = self.instances
-            groups = [list(g) for _, g in groupby(instances, lambda i: i.len)]
+            groups = [list(g) for _, g in groupby(instances, len)]
             batched = []
             for group in groups:
                 if shuffle:

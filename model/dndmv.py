@@ -14,14 +14,14 @@ class DNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     vocab_path: str = 'data/bllip_vec/pos.txt'
     # pos_path: str = 'data/bllip_vec/pos.txt'
 
-    emb_path: str = 'data/bllip_vec/posvec.npy'
+    emb_path: str = ''#data/bllip_vec/posvec.npy'
     pos_emb_path: str = ''
     # emb_path: str = 'data/bllip_vec/sub_wordvectors.npy'
     # pos_emb_path: str = 'data/bllip_vec/posvec.npy'
 
-    dmv_batch_size: int = 15360
+    dmv_batch_size: int = 10240
     reset_neural: bool = False
-    neural_stop_criteria: float = 1e-3
+    neural_stop_criteria: float = 0.001
     neural_max_subepoch: int = 100
     neural_init_epoch: int = 1
 
@@ -35,7 +35,7 @@ class DNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
 
     # dim_pos_emb: int = 20
     dim_word_emb: int = 20
-    dim_valence_emb: int = 20
+    dim_valence_emb: int = 10  # 30??
     dim_hidden: int = 32
     dim_pre_out_decision: int = 12
     dim_pre_out_child: int = 24
@@ -46,13 +46,13 @@ class DNMDVModelOptions(RunnerOptions, DMVOptions, NeuralMOptions):
     use_sentence_emb: bool = True
     use_valence_emb: bool = True
     encoder_mode: str = 'lstm'
-    encoder_lstm_dim_hidden: int = 20
+    encoder_lstm_dim_hidden: int = 16
     encoder_lstm_num_layers: int = 1
     encoder_lstm_dropout: float = 0.
 
-    batch_size: int = 256
+    batch_size: int = 512
     max_epoch: int = 100
-    early_stop: int = 10
+    early_stop: int = 20
     compare_field: str = 'likelihood'
     save_best: bool = True
     show_log: bool = True
@@ -96,21 +96,52 @@ class DNDMVModel(Model):
         self.dmv.reset_root_counter()
 
     def train_one_step(self, epoch_id, batch_id, one_batch):
-        batch_size = len(one_batch[0])
-
+        # TODO use nn predict ROOT param
+        batch_size = len(one_batch[0])  # self.o.dmv_batch_size
         idx = np.arange(batch_size)
 
         id_array = one_batch[0]
         pos_array = cpasarray(one_batch[1])
+        pos_array_torch = cp2torch(pos_array)
         len_array = one_batch[3]
+        len_array_gpu = torch.tensor(len_array, dtype=torch.long, device='cuda')
+        max_len = np.max(len_array)
 
-        ll = self.dmv.e_step(id_array, pos_array, len_array)
+        if self.dmv.initializing:
+            ll = self.dmv.e_step(id_array, pos_array, len_array)
+        else:
+            # TODO clean code
+            self.neural_m.eval()
+            trans_params, dec_params = [], []
+            with torch.no_grad():
+                for i in range(0, batch_size, self.o.batch_size):
+                    sub_idx = slice(i, i + self.o.batch_size)
+                    arrays = {'word': pos_array_torch[sub_idx], 'len': len_array_gpu[sub_idx]}
+
+                    dec_param, trans_param = self.neural_m(arrays, pos_array_torch[sub_idx])
+                    trans_params.append(trans_param)
+                    dec_params.append(dec_param)
+
+            trans_param = cpfempty((batch_size, max_len + 1, max_len + 1, self.o.cv))
+            dec_param = cpfempty((batch_size, max_len + 1, 2, 2, 2))
+            offset = 0
+            for t, d in zip(trans_params, dec_params):
+                _, batch_len, *_ = t.shape
+                t = torch2cp(t)
+                d = torch2cp(d)
+                trans_param[offset: offset + self.o.batch_size, 1:batch_len + 1, 1:batch_len + 1] = t
+                dec_param[offset: offset + self.o.batch_size, 1:batch_len + 1] = d
+                offset += self.o.batch_size
+            root_param = cp.expand_dims(self.dmv.root_param, 0)
+            root_scores = cp.expand_dims(cp.take_along_axis(root_param, self.dmv.input_gaurd(pos_array), 1), -1)
+            trans_param[:, 0, :, :] = root_scores
+            trans_param[:, :, 0, :] = -cp.inf
+
+            ll = self.dmv.e_step_using_unmnanaged_score(pos_array, len_array, trans_param, dec_param)
         self.dmv.batch_dec_trace = cp.sum(self.dmv.batch_dec_trace, axis=2)
 
         dec_trace = cp2torch(self.dmv.batch_dec_trace)
         trans_trace = cp2torch(self.dmv.batch_trans_trace)
-        pos_array = cp2torch(pos_array)
-        len_array_gpu = torch.tensor(len_array, dtype=torch.long, device='cuda')
 
         self.neural_m.train()
         loss_previous = 0.
@@ -122,10 +153,10 @@ class DNDMVModel(Model):
                 self.neural_m.optimizer.zero_grad()
                 # sub_idx = slice(i, i + self.o.batch_size)
                 sub_idx = idx[i: i + self.o.batch_size]
-                arrays = {'word': pos_array[sub_idx], 'len': len_array_gpu[sub_idx]}
+                arrays = {'word': pos_array_torch[sub_idx], 'len': len_array_gpu[sub_idx]}
                 traces = {'decision': dec_trace[sub_idx], 'transition': trans_trace[sub_idx]}
 
-                loss = self.neural_m(arrays, pos_array[sub_idx], traces=traces)
+                loss = self.neural_m(arrays, pos_array_torch[sub_idx], traces=traces)
                 loss_current += loss.item()
                 loss.backward()
                 self.neural_m.optimizer.step()
@@ -135,20 +166,6 @@ class DNDMVModel(Model):
                 if diff_rate < self.o.neural_stop_criteria:
                     break
             loss_previous = loss_current
-
-        self.neural_m.eval()
-        with torch.no_grad():
-            for i in range(0, batch_size, self.o.batch_size):
-                sub_idx = slice(i, i + self.o.batch_size)
-                sub_id_array = id_array[sub_idx]
-                sub_len_array = len_array[sub_idx]
-                arrays = {'word': pos_array[sub_idx], 'len': len_array_gpu[sub_idx]}
-
-                dec_param, trans_param = self.neural_m(arrays, pos_array[sub_idx])
-                dec_param = dec_param.cpu().numpy()
-                trans_param = trans_param.cpu().numpy()
-                self.dmv.put_decision_param(sub_id_array, dec_param, sub_len_array)
-                self.dmv.put_transition_param(sub_id_array, trans_param, sub_len_array)
 
         return {'loss': loss_current, 'likelihood': ll, 'runs': sub_run + 1}
 
@@ -198,7 +215,7 @@ class DNDMVModel(Model):
             result[k] = result[k][0]
         acc, _, _ = calculate_uas(result, dataset)
         if self.o.save_parse_result and mode == 'test':
-            print_to_file(result, self.dev_data, os.path.join(self.r.workspace, 'parsed.txt'))
+            print_to_file(result, self.r.dev_ds, os.path.join(self.r.workspace, 'parsed.txt'))
 
         # restore train status
         self.dmv.all_dec_param = self.model_dec_params

@@ -1,9 +1,11 @@
 import os
 import typing
 from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from utils.functions import make_mask
 
 
@@ -11,6 +13,7 @@ from utils.functions import make_mask
 class NeuralMOptions:
     # MStepModel
     num_lex: int = 0  # in dmv, no need to distinguish lex and pos for l-ndmv
+    num_tag: int = -1
     num_lan: int = 1
 
     dim_pos_emb: int = 10
@@ -114,6 +117,7 @@ class Encoder(nn.Module):
 
         def reset(self):
             return
+
         self.net = encode
         self.reset_func = reset
         self.out_dim = out_dim
@@ -145,6 +149,8 @@ class NeuralM(nn.Module):
                 word_emb = nn.Embedding.from_pretrained(torch.tensor(
                     word_emb, dtype=torch.float), freeze=o.freeze_word_emb)
             else:
+                self.o.num_lex = 33
+                print("manually set numlex to 33 at neural_m.py:__init__.py:NeuralM")
                 word_emb = nn.Embedding(self.o.num_lex + 2, o.dim_word_emb)
             self.word_encoder = Encoder(word_emb, word_emb is not None)
 
@@ -159,6 +165,7 @@ class NeuralM(nn.Module):
                 raise ValueError("the encoder only supports (lstm, empty, onetime)")
 
             self.emb_dim += self.word_encoder.out_dim
+            # self.emb_dim += 20 # NOTE experimental
 
         if o.use_sentence_emb:
             assert o.use_word_emb, 'if use sentence emb, must use word emb'
@@ -264,6 +271,8 @@ class NeuralM(nn.Module):
         if self.o.use_word_emb:
             encoded_word = self.word_encoder(arrays['word'], len_array)
             to_expand.append(encoded_word)
+            # word_emb = self.word_encoder.emb(arrays['word'])  # NOTE experimental
+            # to_expand.append(word_emb)  # NOTE experimental
 
             if self.o.use_sentence_emb:
                 direction_splitted = encoded_word.view(batch_size, max_len, 2, -1)
@@ -347,7 +356,8 @@ class NeuralM(nn.Module):
     @staticmethod
     def loss(forward_out, target_count, mask):
         # mask.to(torch.long) for compatibility (torch <= 1.2)
-        batch_loss = -torch.sum(target_count * forward_out * mask.to(torch.long)) / torch.sum(mask)
+        # TODO in some cases, here use len(mask) will improve performance (WHY???)
+        batch_loss = -torch.sum(target_count * forward_out * mask.to(torch.long)) / len(mask)
         return batch_loss
 
     @staticmethod

@@ -179,7 +179,7 @@ class NDMVModel(Model):
             result[k] = result[k][0]
         acc, _, _ = calculate_uas(result, dataset)
         if self.o.save_parse_result and mode == 'test':
-            print_to_file(result, self.dev_data, os.path.join(self.r.workspace, 'parsed.txt'))
+            print_to_file(result, self.r.dev_ds, os.path.join(self.r.workspace, 'parsed.txt'))
 
         # restore train status
         self.dmv.all_dec_param = self.model_dec_params

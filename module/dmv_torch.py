@@ -1,14 +1,13 @@
 import os
-from typing import Union, Tuple
 from dataclasses import dataclass
 
 import cupyx as cpx
-import torch
-from utils.common import *
-from utils.functions import torch2cp, cp2torch, logaddexp
 from torch import nn
-from utils.options import Options
+
 from module.eisner_torch import batch_inside, batch_inside_prob
+from utils.common import *
+from utils.functions import torch2cp, cp2torch
+from utils.options import Options
 
 
 @dataclass
@@ -21,7 +20,7 @@ class DMVOptions(Options):
     param_smoothing: float = 1e-2  # smooth for m_step
     initializing: bool = True
 
-    lr: float = 0.001
+    lr: float = 0.03
 
 
 class DMV(nn.Module):
@@ -49,8 +48,8 @@ class DMV(nn.Module):
 
             # self.optimizer = torch.optim.SGD([self.root_param, self.trans_param, self.dec_param],
             #     lr=0.1, momentum=0.)
-            self.optimizer = torch.optim.Adam([self.root_param, self.trans_param, self.dec_param],
-                lr=self.o.lr)
+            self.optimizer = torch.optim.RMSprop([self.root_param, self.trans_param, self.dec_param],
+                                              lr=self.o.lr)
         else:
             del self.root_param
             del self.trans_param
@@ -69,11 +68,10 @@ class DMV(nn.Module):
         return prob
 
     def parse(self, trans_scores, dec_scores, len_array):
-
         self.zero_grad()
         trans_scores.retain_grad()
 
-        ictable, iitable, prob = batch_inside(trans_scores, dec_scores, len_array, 'max')
+        *_, prob = batch_inside(trans_scores, dec_scores, len_array, 'max')
         ll = torch.sum(prob)
         ll.backward()
 
@@ -96,14 +94,19 @@ class DMV(nn.Module):
             for d, i, _ in data:
                 d.data = torch.log(-d.grad + self.o.param_smoothing)
 
-    def prepare_scores(self, tag_array):
+    def  prepare_scores(self, tag_array, do_normalize=False):
         """param[tag_num, ...] to param[batch, sentence_len, ...]"""
         # trans_scores:     batch, head, child, cv
         # dec_scores:       batch, head, direction, dv, decision
 
-        trans_param = self.trans_param
-        dec_param = self.dec_param
-        root_param = self.root_param
+        if do_normalize:
+            trans_param = torch.log_softmax(self.trans_param, dim=1)
+            dec_param = torch.log_softmax(self.dec_param, dim=3)
+            root_param = torch.log_softmax(self.root_param, dim=0)
+        else:
+            trans_param = self.trans_param
+            dec_param = self.dec_param
+            root_param = self.root_param
 
         n, c = self.o.num_tag, self.o.cv
         batch_size, fake_len = tag_array.shape
@@ -124,7 +127,7 @@ class DMV(nn.Module):
         root_param = root_param.unsqueeze(0).expand(batch_size, n)
         root_scores = torch.gather(root_param, 1, tag_array).unsqueeze(-1)
         trans_scores[:, 0, :, :] = root_scores
-        trans_scores[:, :, 0, :] = -np.inf
+        trans_scores[:, :, 0, :] = -1e20
 
         return trans_scores, dec_scores
 
@@ -140,11 +143,9 @@ class DMV(nn.Module):
 
         with torch.no_grad():
             for d, i, _ in data:
-                # logaddexp(d, self.o.param_smoothing, d.data)
-                s = torch.logsumexp(d, dim=i, keepdim=True)
-                d.data = d - s
+                d.data = torch.log_softmax(d, dim=i)
 
-    def init_param(self, dataset, getter=None):
+    def  init_param(self, dataset, getter=None):
         # require same_len
         harmonic_sum = [0., 1.]
 
@@ -232,96 +233,6 @@ class DMV(nn.Module):
         cp.log(trans_param, out=trans_param)
         cp.log(root_param, out=root_param)
         cp.log(dec_param, out=dec_param)
-
-    def init_pretrained(self, dataset, getter=None):
-        if getter is None:
-            def getter(x):
-                return cpasarray(x[1])
-
-        def recovery_one(heads):
-            left_most = np.arange(len(heads))
-            right_most = np.arange(len(heads))
-            for idx, each_head in enumerate(heads):
-                if each_head in (0, len(heads) + 1):  # skip head is ROOT
-                    continue
-                else:
-                    each_head -= 1
-                assert each_head >= 0
-                if idx < left_most[each_head]:
-                    left_most[each_head] = idx
-                if idx > right_most[each_head]:
-                    right_most[each_head] = idx
-
-            valences = npiempty((len(heads), 2))
-            head_valences = npiempty(len(heads))
-
-            for idx, each_head in enumerate(heads):
-                if each_head in (0, len(heads) + 1):
-                    valences[idx] = HASCHILD if len(heads) > 1 else NOCHILD
-                    continue
-                else:
-                    each_head -= 1
-                valences[idx, 0] = NOCHILD if left_most[idx] == idx else HASCHILD
-                valences[idx, 1] = NOCHILD if right_most[idx] == idx else HASCHILD
-                if each_head > idx:  # d = 0
-                    head_valences[idx] = NOCHILD if left_most[each_head] == idx else HASCHILD
-                else:
-                    head_valences[idx] = NOCHILD if right_most[each_head] == idx else HASCHILD
-            return valences, head_valences
-
-        heads = npiempty((len(dataset), self.o.max_len + 1))
-        valences = npiempty((len(dataset), self.o.max_len + 1, 2))
-        head_valences = npiempty((len(dataset), self.o.max_len + 1))
-
-        for idx, instance in enumerate(dataset.instances):
-            one_heads = npasarray(list(map(int, instance.misc)))
-            one_valences, one_head_valences = recovery_one(one_heads)
-            heads[idx, 1:instance.len + 1] = one_heads
-            valences[idx, 1:instance.len + 1] = one_valences
-            head_valences[idx, 1:instance.len + 1] = one_head_valences
-
-        heads = cpasarray(heads)
-        valences = cpasarray(valences)
-        head_valences = cpasarray(head_valences)
-
-        batch_size, sentence_len = heads.shape
-        len_array = cpasarray(dataset.get_len())
-        batch_arange = cp.arange(batch_size)
-
-        save_batch_data = dataset.batch_data
-        dataset.build_batchs(len(dataset), same_len=False, shuffle=False)
-        tag_array = getter(dataset.batch_data[0])
-        dataset.batch_data = save_batch_data
-
-        self.reset_root_counter()
-        self.batch_trans_trace = cpfzeros((batch_size, self.o.max_len, self.o.max_len, 2, self.o.cv))
-        self.batch_dec_trace = cpfzeros((batch_size, self.o.max_len, self.o.max_len, 2, 2, 2))
-
-        for m in range(1, sentence_len):
-            h = heads[:, m]
-            direction = (h <= m).astype(cpi)
-            h_valence = head_valences[:, m]
-            m_valence = valences[:, m]
-            m_child_valence = h_valence if self.o.cv > 1 else cp.zeros_like(h_valence)
-
-            len_mask = ((h <= len_array) & (m <= len_array))
-
-            self.batch_dec_trace[batch_arange, m - 1, m - 1, 0, m_valence[:, 0], STOP] = len_mask
-            self.batch_dec_trace[batch_arange, m - 1, m - 1, 1, m_valence[:, 1], STOP] = len_mask
-
-            head_mask = h == 0
-            mask = head_mask * len_mask
-            if mask.any():
-                cpx.scatter_add(self.root_counter, tag_array[:, m - 1], mask)
-
-            head_mask = ~head_mask
-            mask = head_mask * len_mask
-            if mask.any():
-                self.batch_trans_trace[batch_arange, h - 1, m - 1, direction, m_child_valence] = mask
-                self.batch_dec_trace[batch_arange, h - 1, m - 1, direction, h_valence, GO] = mask
-
-        d, t = self.get_batch_counter_by_tag(tag_array, mode=1)
-        self.m_step(t[0], d[0])
 
     def set_function_mask(self, functions_to_mask):
         self.function_mask_set = cpasarray(functions_to_mask)

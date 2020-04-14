@@ -98,9 +98,9 @@ class Logger:
 
     def write_result(self, result, *, prefix=None, time=None, train_epoch=-1, is_dev=False, is_test=False):
         prefix = self.get_prefix(prefix, train_epoch, is_dev, is_test)
-        result = [f"{k} = {v:{'.2f' if isinstance(v,float) else ''}}" for k, v in result.items()]
+        result = [f"{k} = {v:{'.8f' if isinstance(v,float) else ''}}" for k, v in result.items()]
         result = ', '.join(result)
-        suffix = f'({time:.2f}s)' if time else ''
+        suffix = f'({time:.5f}s)' if time else ''
         self._write(' '.join([prefix, result, suffix]))
 
 
@@ -149,6 +149,11 @@ class Runner:
         self.load()
         self.model.build()
 
+        self.best_epoch = -1
+        self.best = None
+        self.prev_train_result = None
+        self.prev_dev_result = None
+
         # recovery
         if o.load_train:
             self.load_train(o.load_train)
@@ -171,13 +176,7 @@ class Runner:
             self.checkpoints_path = o.workspace + '/checkpoints'
             make_sure_dir_exists(self.checkpoints_path)
 
-        self.best_epoch = -1
-        self.best = None
-        self.prev_train_result = None
-        self.prev_dev_result = None
-
         self.checkpoints = []
-
         self.o.save(self.workspace + '/options.json')
 
     def train(self):

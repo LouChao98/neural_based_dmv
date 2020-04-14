@@ -344,9 +344,7 @@ class DMV:
             for idx, each_head in enumerate(heads):
                 if each_head in (0, len(heads) + 1):  # skip head is ROOT
                     continue
-                else:
-                    each_head -= 1
-                assert each_head >= 0
+                each_head -= 1
                 if idx < left_most[each_head]:
                     left_most[each_head] = idx
                 if idx > right_most[each_head]:
@@ -356,14 +354,10 @@ class DMV:
             head_valences = npiempty(len(heads))
 
             for idx, each_head in enumerate(heads):
-                if each_head in (0, len(heads) + 1):
-                    valences[idx] = HASCHILD if len(heads) > 1 else NOCHILD
-                    continue
-                else:
-                    each_head -= 1
+                each_head -= 1
                 valences[idx, 0] = NOCHILD if left_most[idx] == idx else HASCHILD
                 valences[idx, 1] = NOCHILD if right_most[idx] == idx else HASCHILD
-                if each_head > idx:  # d = 0
+                if each_head > idx:  # each_head = -1 `s head_valence is never used
                     head_valences[idx] = NOCHILD if left_most[each_head] == idx else HASCHILD
                 else:
                     head_valences[idx] = NOCHILD if right_most[each_head] == idx else HASCHILD
@@ -541,11 +535,14 @@ class DMV:
             trans_scores = self.all_trans_param[idx_array]
             dec_scores = self.all_dec_param[idx_array]
         else:
-            if self.trans_buffer is None:
+            if self.trans_buffer is None or self._buffer_batch_size < batch_size:
                 self.dec_buffer = cp.cuda.alloc_pinned_memory(
-                    batch_size * (self.o.max_len + 1) * 8 * (np.dtype(npf).itemsize))
+                    batch_size * (self.o.max_len + 1) * 8 * np.dtype(npf).itemsize)
                 self.trans_buffer = cp.cuda.alloc_pinned_memory(
-                    batch_size * (self.o.max_len + 1) * (self.o.max_len + 1) * self.o.cv * (np.dtype(npf).itemsize))
+                    batch_size * (self.o.max_len + 1) * (self.o.max_len + 1) * self.o.cv * np.dtype(npf).itemsize)
+
+                self._buffer_batch_size = batch_size
+
             trans_scores = np.frombuffer(self.trans_buffer, npf,
                 batch_size * (max_len + 1) * (max_len + 1) * self.o.cv) \
                 .reshape(batch_size, (max_len + 1), (max_len + 1), self.o.cv)
